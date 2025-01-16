@@ -28,6 +28,7 @@ use imessage_database::{
         handwriting::HandwrittenMessage,
         music::MusicMessage,
         placemark::PlacemarkMessage,
+        sticker::StickerSource,
         text_effects::{Animation, Style, TextEffect, Unit},
         url::URLMessage,
         variants::{Announcement, BalloonProvider, CustomBalloon, URLOverride, Variant},
@@ -35,14 +36,14 @@ use imessage_database::{
     tables::{
         attachment::{Attachment, MediaType},
         messages::{
-            models::{AttachmentMeta, BubbleComponent},
+            models::{AttachmentMeta, BubbleComponent, TextAttributes},
             Message,
         },
-        table::{Table, FITNESS_RECEIVER, ME, ORPHANED, YOU},
+        table::{AttributedBody, Table, FITNESS_RECEIVER, ME, ORPHANED, YOU},
     },
     util::{
         dates::{format, get_local_time, readable_diff, TIMESTAMP_FACTOR},
-        plist::parse_plist,
+        plist::parse_ns_keyed_archiver,
     },
 };
 
@@ -156,7 +157,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
         match self.config.conversation(message) {
             Some((chatroom, _)) => {
                 let filename = self.config.filename(chatroom);
-                return match self.files.entry(filename) {
+                match self.files.entry(filename) {
                     Occupied(entry) => Ok(entry.into_mut()),
                     Vacant(entry) => {
                         let mut path = self.config.options.export_path.clone();
@@ -182,7 +183,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
 
                         Ok(entry.insert(buf))
                     }
-                };
+                }
             }
             None => Ok(&mut self.orphaned),
         }
@@ -338,19 +339,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                                 };
                             }
                         } else {
-                            let mut formatted_text = String::with_capacity(text.len());
-
-                            for text_attr in text_attrs {
-                                // We cannot sanitize the html beforehand because it may change the length of the text
-                                if let Some(message_content) =
-                                    text.get(text_attr.start..text_attr.end)
-                                {
-                                    formatted_text.push_str(&self.format_attributed(
-                                        &sanitize_html(message_content),
-                                        &text_attr.effect,
-                                    ))
-                                }
-                            }
+                            let mut formatted_text = self.format_attributes(text, text_attrs);
 
                             // If we failed to parse any text above, make sure we sanitize if before using it
                             if formatted_text.is_empty() {
@@ -554,7 +543,7 @@ impl<'a> Writer<'a> for HTML<'a> {
         // Build a relative filepath from the fully qualified one on the `Attachment`
         let embed_path = self.config.message_attachment_path(attachment);
 
-        return Ok(match attachment.mime_type() {
+        Ok(match attachment.mime_type() {
             MediaType::Image(_) => {
                 if self.config.options.no_lazy {
                     format!("<img src=\"{embed_path}\">")
@@ -590,30 +579,49 @@ impl<'a> Writer<'a> for HTML<'a> {
             MediaType::Other(media_type) => {
                 format!("<p>Unable to embed {media_type} attachments: {embed_path}</p>")
             }
-        });
+        })
     }
 
     fn format_sticker(&self, sticker: &'a mut Attachment, message: &Message) -> String {
         match self.format_attachment(sticker, message, &AttachmentMeta::default()) {
             Ok(mut sticker_embed) => {
-                // Add sticker effect
-                let sticker_effect = sticker.get_sticker_effect(
-                    &self.config.options.platform,
-                    &self.config.options.db_path,
-                    self.config.options.attachment_root.as_deref(),
-                );
-                if let Ok(Some(sticker_effect)) = sticker_effect {
-                    sticker_embed.push_str(&format!(
-                        "\n<div class=\"sticker_effect\">Sent with {sticker_effect} effect</div>"
-                    ))
+                // Determine the source of the sticker
+                if let Some(sticker_source) = sticker.get_sticker_source(&self.config.db) {
+                    match sticker_source {
+                        StickerSource::Genmoji => {
+                            // Add sticker prompt
+                            if let Some(prompt) = &sticker.emoji_description {
+                                sticker_embed.push_str(&format!(
+                                    "\n<div class=\"genmoji_prompt\">Genmoji prompt: {prompt}</div>"
+                                ))
+                            }
+                        }
+                        StickerSource::Memoji => sticker_embed
+                            .push_str("\n<div class=\"sticker_name\">App: Memoji</div>"),
+                        StickerSource::UserGenerated => {
+                            // Add sticker effect
+                            if let Ok(Some(sticker_effect)) = sticker.get_sticker_effect(
+                                &self.config.options.platform,
+                                &self.config.options.db_path,
+                                self.config.options.attachment_root.as_deref(),
+                            ) {
+                                sticker_embed.push_str(&format!(
+                                    "\n<div class=\"sticker_effect\">Sent with {sticker_effect} effect</div>"
+                                ))
+                            }
+                        }
+                        StickerSource::App(bundle_id) => {
+                            // Add the application name used to generate/send the sticker
+                            let app_name = sticker
+                                .get_sticker_source_application_name(&self.config.db)
+                                .unwrap_or(bundle_id);
+                            sticker_embed.push_str(&format!(
+                                "\n<div class=\"sticker_name\">App: {app_name}</div>"
+                            ))
+                        }
+                    }
                 }
 
-                // Add sticker prompt
-                if let Some(prompt) = &sticker.emoji_description {
-                    sticker_embed.push_str(&format!(
-                        "\n<div class=\"sticker_effect\">Genmoji prompt: {prompt}</div>"
-                    ))
-                }
                 sticker_embed
             }
             Err(embed) => embed.to_string(),
@@ -650,7 +658,7 @@ impl<'a> Writer<'a> for HTML<'a> {
 
             if let Some(payload) = message.payload_data(&self.config.db) {
                 let res = if message.is_url() {
-                    let parsed = parse_plist(&payload)?;
+                    let parsed = parse_ns_keyed_archiver(&payload)?;
                     let bubble = URLMessage::get_url_message_override(&parsed)?;
                     match bubble {
                         URLOverride::Normal(balloon) => self.format_url(message, &balloon, message),
@@ -664,7 +672,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                         }
                     }
                 } else {
-                    let parsed = parse_plist(&payload)?;
+                    let parsed = parse_ns_keyed_archiver(&payload)?;
                     match AppMessage::from_map(&parsed) {
                         Ok(bubble) => match balloon {
                             CustomBalloon::Application(bundle_id) => {
@@ -778,7 +786,7 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
         let timestamp = format(&msg.date(&self.config.offset));
 
-        return match msg.get_announcement() {
+        match msg.get_announcement() {
             Some(announcement) => match announcement {
                 Announcement::NameChange(name) => {
                     let clean_name = sanitize_html(name);
@@ -805,7 +813,7 @@ impl<'a> Writer<'a> for HTML<'a> {
             None => String::from(
                 "\n<div class =\"announcement\"><p>Unable to format announcement!</p></div>\n",
             ),
-        };
+        }
     }
 
     fn format_shareplay(&self) -> &str {
@@ -839,19 +847,28 @@ impl<'a> Writer<'a> for HTML<'a> {
 
                     for (idx, event) in edited_message_part.edit_history.iter().enumerate() {
                         let last = idx == edited_message_part.edit_history.len() - 1;
-                        let clean_text = sanitize_html(&event.text);
-                        match previous_timestamp {
-                            None => out_s.push_str(&self.edited_to_html("", &clean_text, last)),
-                            Some(prev_timestamp) => {
-                                let end = get_local_time(&event.date, &self.config.offset);
-                                let start = get_local_time(prev_timestamp, &self.config.offset);
+                        if let Some(text) = &event.text {
+                            let clean_text = if let Some(BubbleComponent::Text(attributes)) =
+                                event.body().first()
+                            {
+                                Cow::Owned(self.format_attributes(text, attributes))
+                            } else {
+                                sanitize_html(text)
+                            };
 
-                                let diff = readable_diff(start, end).unwrap_or_default();
-                                out_s.push_str(&self.edited_to_html(
-                                    &format!("Edited {diff} later"),
-                                    &clean_text,
-                                    last,
-                                ));
+                            match previous_timestamp {
+                                None => out_s.push_str(&self.edited_to_html("", &clean_text, last)),
+                                Some(prev_timestamp) => {
+                                    let end = get_local_time(&event.date, &self.config.offset);
+                                    let start = get_local_time(prev_timestamp, &self.config.offset);
+                                    let diff = readable_diff(start, end).unwrap_or_default();
+
+                                    out_s.push_str(&self.edited_to_html(
+                                        &format!("Edited {diff} later"),
+                                        &clean_text,
+                                        last,
+                                    ));
+                                }
                             }
                         }
 
@@ -894,16 +911,16 @@ impl<'a> Writer<'a> for HTML<'a> {
         None
     }
 
-    fn format_attributed(&'a self, text: &'a str, attribute: &'a TextEffect) -> Cow<str> {
-        match attribute {
-            TextEffect::Default => Cow::Borrowed(text),
-            TextEffect::Mention(mentioned) => Cow::Owned(self.format_mention(text, mentioned)),
-            TextEffect::Link(url) => Cow::Owned(self.format_link(text, url)),
-            TextEffect::OTP => Cow::Owned(self.format_otp(text)),
-            TextEffect::Styles(styles) => Cow::Owned(self.format_styles(text, styles)),
-            TextEffect::Animated(animation) => Cow::Owned(self.format_animated(text, animation)),
-            TextEffect::Conversion(unit) => Cow::Owned(self.format_conversion(text, unit)),
-        }
+    fn format_attributes(&'a self, text: &'a str, attributes: &'a [TextAttributes]) -> String {
+        let mut formatted_text = String::with_capacity(text.len());
+        attributes.iter().for_each(|effect| {
+            if let Some(message_content) = text.get(effect.start..effect.end) {
+                // We cannot sanitize the html beforehand because it may change the length of the text
+                formatted_text
+                    .push_str(&self.format_effect(&sanitize_html(message_content), &effect.effect));
+            }
+        });
+        formatted_text
     }
 
     fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
@@ -1397,7 +1414,19 @@ impl<'a> BalloonFormatter<&'a Message> for HTML<'a> {
     }
 }
 
-impl<'a> TextEffectFormatter for HTML<'a> {
+impl<'a> TextEffectFormatter<'a> for HTML<'a> {
+    fn format_effect(&'a self, text: &'a str, effect: &'a TextEffect) -> Cow<'a, str> {
+        match effect {
+            TextEffect::Default => Cow::Borrowed(text),
+            TextEffect::Mention(mentioned) => Cow::Owned(self.format_mention(text, mentioned)),
+            TextEffect::Link(url) => Cow::Owned(self.format_link(text, url)),
+            TextEffect::OTP => Cow::Owned(self.format_otp(text)),
+            TextEffect::Styles(styles) => Cow::Owned(self.format_styles(text, styles)),
+            TextEffect::Animated(animation) => Cow::Owned(self.format_animated(text, animation)),
+            TextEffect::Conversion(unit) => Cow::Owned(self.format_conversion(text, unit)),
+        }
+    }
+
     fn format_mention(&self, text: &str, mentioned: &str) -> String {
         format!("<span title=\"{mentioned}\"><b>{text}</b></span>")
     }
@@ -1438,7 +1467,7 @@ impl<'a> TextEffectFormatter for HTML<'a> {
     }
 }
 
-impl<'a> HTML<'a> {
+impl HTML<'_> {
     fn get_time(&self, message: &Message) -> String {
         let mut date = format(&message.date(&self.config.offset));
         let read_after = message.time_until_read(&self.config.offset);
@@ -2063,9 +2092,9 @@ mod tests {
 
         let mut message = Config::fake_message();
         message.is_from_me = false;
-        message.other_handle = 2;
+        message.other_handle = Some(2);
         message.share_status = false;
-        message.share_direction = false;
+        message.share_direction = Some(false);
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
@@ -2086,9 +2115,9 @@ mod tests {
 
         let mut message = Config::fake_message();
         message.is_from_me = false;
-        message.other_handle = 2;
+        message.other_handle = Some(2);
         message.share_status = true;
-        message.share_direction = false;
+        message.share_direction = Some(false);
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
@@ -2110,9 +2139,9 @@ mod tests {
         let mut message = Config::fake_message();
         message.handle_id = None;
         message.is_from_me = false;
-        message.other_handle = 0;
+        message.other_handle = Some(0);
         message.share_status = false;
-        message.share_direction = false;
+        message.share_direction = Some(false);
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
@@ -2134,9 +2163,9 @@ mod tests {
         let mut message = Config::fake_message();
         message.handle_id = None;
         message.is_from_me = false;
-        message.other_handle = 0;
+        message.other_handle = Some(0);
         message.share_status = true;
-        message.share_direction = false;
+        message.share_direction = Some(false);
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
@@ -2230,6 +2259,7 @@ mod tests {
         let message = Config::fake_message();
 
         let mut attachment = Config::fake_attachment();
+        attachment.rowid = 3;
         attachment.is_sticker = true;
         let sticker_path = current_dir()
             .unwrap()
@@ -2249,7 +2279,7 @@ mod tests {
             .parent()
             .unwrap()
             .join("orphaned.html");
-        std::fs::remove_file(orphaned_path).unwrap();
+        let _ = std::fs::remove_file(orphaned_path);
     }
 
     #[test]
@@ -2264,8 +2294,44 @@ mod tests {
         let message = Config::fake_message();
 
         let mut attachment = Config::fake_attachment();
+        attachment.rowid = 2;
         attachment.is_sticker = true;
-        attachment.emoji_description = Some("Example description".to_string());
+        let sticker_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/stickers/outline.heic");
+        attachment.filename = Some(sticker_path.to_string_lossy().to_string());
+        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.emoji_description = Some("pink poodle".to_string());
+
+        let actual = exporter.format_sticker(&mut attachment, &message);
+
+        assert_eq!(actual, "<img src=\"imessage-database/test_data/stickers/outline.heic\" loading=\"lazy\">\n<div class=\"genmoji_prompt\">Genmoji prompt: pink poodle</div>");
+
+        // Remove the file created by the constructor for this test
+        let orphaned_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("orphaned.html");
+        let _ = std::fs::remove_file(orphaned_path);
+    }
+
+    #[test]
+    fn can_format_html_attachment_sticker_app() {
+        // Create exporter
+        let mut options = Options::fake_options(ExportType::Html);
+        options.export_path = current_dir().unwrap().parent().unwrap().to_path_buf();
+
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let message = Config::fake_message();
+
+        let mut attachment = Config::fake_attachment();
+        attachment.rowid = 1;
+        attachment.is_sticker = true;
         let sticker_path = current_dir()
             .unwrap()
             .parent()
@@ -2276,7 +2342,7 @@ mod tests {
 
         let actual = exporter.format_sticker(&mut attachment, &message);
 
-        assert_eq!(actual, "<img src=\"imessage-database/test_data/stickers/outline.heic\" loading=\"lazy\">\n<div class=\"sticker_effect\">Sent with Outline effect</div>\n<div class=\"sticker_effect\">Genmoji prompt: Example description</div>");
+        assert_eq!(actual, "<img src=\"imessage-database/test_data/stickers/outline.heic\" loading=\"lazy\">\n<div class=\"sticker_name\">App: Free People</div>");
 
         // Remove the file created by the constructor for this test
         let orphaned_path = current_dir()
@@ -2284,7 +2350,7 @@ mod tests {
             .parent()
             .unwrap()
             .join("orphaned.html");
-        std::fs::remove_file(orphaned_path).unwrap();
+        let _ = std::fs::remove_file(orphaned_path);
     }
 
     #[test]
@@ -2724,7 +2790,7 @@ mod text_effect_tests {
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
-        let expected = exporter.format_attributed("Chris", &TextEffect::Default);
+        let expected = exporter.format_effect("Chris", &TextEffect::Default);
         let actual = "Chris";
 
         assert_eq!(expected, actual);
@@ -3120,9 +3186,156 @@ mod edited_tests {
 
     use crate::{exporters::exporter::Writer, Config, Exporter, Options, HTML};
     use imessage_database::{
-        message_types::edited::{EditStatus, EditedMessage, EditedMessagePart},
-        util::typedstream::parser::TypedStreamReader,
+        message_types::edited::{EditStatus, EditedEvent, EditedMessage, EditedMessagePart},
+        util::typedstream::{
+            models::{Archivable, Class, OutputData},
+            parser::TypedStreamReader,
+        },
     };
+
+    #[test]
+    fn can_format_html_edited_with_formatting() {
+        // Set timezone to PST for consistent Local time
+        set_var("TZ", "PST");
+
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        // Create edited message data
+        let edited_message = EditedMessage {
+            parts: vec![EditedMessagePart {
+                status: EditStatus::Edited,
+                edit_history: vec![
+                    EditedEvent {
+                        date: 758573156000000000,
+                        text: Some("Test".to_string()),
+                        components: Some(vec![
+                            Archivable::Object(
+                                Class {
+                                    name: "NSString".to_string(),
+                                    version: 1,
+                                },
+                                vec![OutputData::String("Test".to_string())],
+                            ),
+                            Archivable::Data(vec![
+                                OutputData::SignedInteger(1),
+                                OutputData::UnsignedInteger(4),
+                            ]),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSDictionary".to_string(),
+                                    version: 0,
+                                },
+                                vec![OutputData::SignedInteger(1)],
+                            ),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSString".to_string(),
+                                    version: 1,
+                                },
+                                vec![OutputData::String(
+                                    "__kIMMessagePartAttributeName".to_string(),
+                                )],
+                            ),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSNumber".to_string(),
+                                    version: 0,
+                                },
+                                vec![OutputData::SignedInteger(0)],
+                            ),
+                        ]),
+                        guid: None,
+                    },
+                    EditedEvent {
+                        date: 758573166000000000,
+                        text: Some("Test".to_string()),
+                        components: Some(vec![
+                            Archivable::Object(
+                                Class {
+                                    name: "NSString".to_string(),
+                                    version: 1,
+                                },
+                                vec![OutputData::String("Test".to_string())],
+                            ),
+                            Archivable::Data(vec![
+                                OutputData::SignedInteger(1),
+                                OutputData::UnsignedInteger(4),
+                            ]),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSDictionary".to_string(),
+                                    version: 0,
+                                },
+                                vec![OutputData::SignedInteger(2)],
+                            ),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSString".to_string(),
+                                    version: 1,
+                                },
+                                vec![OutputData::String(
+                                    "__kIMTextStrikethroughAttributeName".to_string(),
+                                )],
+                            ),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSNumber".to_string(),
+                                    version: 0,
+                                },
+                                vec![OutputData::SignedInteger(1)],
+                            ),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSString".to_string(),
+                                    version: 1,
+                                },
+                                vec![OutputData::String(
+                                    "__kIMMessagePartAttributeName".to_string(),
+                                )],
+                            ),
+                            Archivable::Object(
+                                Class {
+                                    name: "NSNumber".to_string(),
+                                    version: 0,
+                                },
+                                vec![OutputData::SignedInteger(0)],
+                            ),
+                        ]),
+                        guid: Some("76A466B8-D21E-4A20-AF62-FF2D3A20D31C".to_string()),
+                    },
+                ],
+            }],
+        };
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.date_edited = 674530231992568192;
+        message.text = Some("Test".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message.edited_parts = Some(edited_message);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/EditedWithFormatting");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<div class=\"edited\"><table><tbody><tr><td><span class=\"timestamp\"></span></td><td>Test</td></tr></tbody><tfoot><tr><td><span class=\"timestamp\">Edited 10 seconds later</span></td><td><s>Test</s></td></tr></tfoot></table></div>\n</div>\n</div>\n</div>\n";
+
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn can_format_html_conversion_final_unsent() {

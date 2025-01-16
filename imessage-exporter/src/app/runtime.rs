@@ -30,12 +30,14 @@ use imessage_database::{
         handle::Handle,
         messages::Message,
         table::{
-            get_connection, get_db_size, Cacheable, Deduplicate, Diagnostic, ATTACHMENTS_DIR,
-            MAX_LENGTH, ME, ORPHANED, UNKNOWN,
+            get_connection, get_db_size, Cacheable, Deduplicate, Diagnostic, ATTACHMENTS_DIR, ME,
+            ORPHANED, UNKNOWN,
         },
     },
     util::{dates::get_offset, size::format_file_size},
 };
+
+const MAX_LENGTH: usize = 235;
 
 /// Stores the application state and handles application lifecycle
 pub struct Config {
@@ -112,7 +114,7 @@ impl Config {
                     &self.options.db_path,
                     self.options.attachment_root.as_deref(),
                 )
-                .unwrap_or(attachment.filename().to_string()),
+                .unwrap_or_else(|| attachment.filename().to_string()),
         }
     }
 
@@ -502,9 +504,9 @@ impl Config {
             is_from_me: false,
             is_read: false,
             item_type: 0,
-            other_handle: 0,
+            other_handle: None,
             share_status: false,
-            share_direction: false,
+            share_direction: None,
             group_title: None,
             group_action_type: 0,
             associated_message_guid: None,
@@ -542,8 +544,10 @@ impl Config {
 
 #[cfg(test)]
 mod filename_tests {
-    use crate::{Config, Options};
-    use imessage_database::tables::{chat::Chat, table::MAX_LENGTH};
+    use crate::{app::runtime::MAX_LENGTH, Config, Options};
+
+    use imessage_database::tables::chat::Chat;
+
     use std::collections::BTreeSet;
 
     fn fake_chat() -> Chat {

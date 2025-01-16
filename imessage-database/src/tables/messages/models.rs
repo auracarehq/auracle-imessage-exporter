@@ -58,7 +58,7 @@ impl<'a> Service<'a> {
     }
 }
 
-impl<'a> Display for Service<'a> {
+impl Display for Service<'_> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
         match self {
             Service::iMessage => write!(fmt, "iMessage"),
@@ -73,7 +73,7 @@ impl<'a> Display for Service<'a> {
 
 /// Defines ranges of text and associated attributes parsed from [`typedstream`](crate::util::typedstream) `attributedBody` data.
 ///
-/// Ranges specify locations attributes applied to specific portions of a [`Message`](crate::tables::messages::Message)'s [`text`](crate::tables::messages::Message::text). For example, given message text with a [`Mention`](TextEffect::Mention) like:
+/// Ranges specify locations where attributes are applied to specific portions of a [`Message`](crate::tables::messages::Message)'s [`text`](crate::tables::messages::Message::text). For example, given message text with a [`Mention`](TextEffect::Mention) like:
 ///
 /// ```
 /// let message_text = "What's up, Christopher?";

@@ -285,7 +285,9 @@ span[class^="animation"] {
 	text-shadow: #000 0 0 10px;
 }
 
-div.sticker_effect {
+div.sticker_effect,
+div.sticker_name,
+div.genmoji_prompt {
 	opacity: 60%;
 }
 

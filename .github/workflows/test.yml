@@ -12,6 +12,8 @@ env:
 jobs:
   Test:
     runs-on: ubuntu-latest
+    env:
+      TZ: PST
 
     steps:
       - uses: actions/checkout@v2

@@ -309,8 +309,8 @@ impl<'a> TypedStreamReader<'a> {
                         return Ok(self.object_table.get(idx));
                     }
                     ClassResult::ClassHierarchy(classes) => {
-                        for class in classes.iter() {
-                            self.object_table.push(class.clone())
+                        for class in classes.into_iter() {
+                            self.object_table.push(class)
                         }
                     }
                 }

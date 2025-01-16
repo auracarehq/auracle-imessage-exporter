@@ -1,4 +1,4 @@
-mod bundle_id_tests;
+mod variant;
 mod date_tests;
 mod edited_tests;
 mod expressive_tests;

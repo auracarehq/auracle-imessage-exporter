@@ -2,7 +2,6 @@
  Represents CLI options and validation logic.
 */
 
-
 use std::path::PathBuf;
 
 use clap::{crate_version, Arg, ArgAction, ArgMatches, Command};
@@ -456,7 +455,11 @@ fn get_command() -> Command {
 impl Options {
     pub fn fake_options(export_type: ExportType) -> Options {
         Options {
-            db_path: default_db_path(),
+            db_path: std::env::current_dir()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("imessage-database/test_data/db/test.db"),
             attachment_root: None,
             attachment_manager: AttachmentManager::from(AttachmentManagerMode::Disabled),
             diagnostic: false,
