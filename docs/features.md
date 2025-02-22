@@ -82,7 +82,7 @@ This tool targets the current latest public release for macOS and iMessage. It m
     - Preview images display in HTML exports
     - URLs that have rotten may still retain some context if they have cached data
   - Handles cases where URL messages are overloaded with other message types
-    - Apple Music (including preview streams)
+    - Apple Music (including preview streams and lyrics)
     - Apple Maps (including `Placemark` data)
     - App Store (including app metadata)
     - Rich Collaboration

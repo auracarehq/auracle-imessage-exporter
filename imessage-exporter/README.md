@@ -12,7 +12,7 @@ This binary is available on [crates.io](https://crates.io/crates/imessage-export
 
 `cargo install imessage-exporter` is the best way to install the app for normal use.
 
-<details><summary>Uninstall steps</summary><p><pre>$ cargo uninstall imessage-exporter</pre></p></details>
+<details><summary>Uninstall steps</summary><p><pre>$ cargo uninstall imessage-exporter</pre></p><p>Optional: uninstall Rust<pre>$ rustup self uninstall</pre></p></details>
 
 ### Homebrew
 

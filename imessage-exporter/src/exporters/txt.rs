@@ -1,7 +1,7 @@
 use std::{
     collections::{
-        hash_map::Entry::{Occupied, Vacant},
         HashMap,
+        hash_map::Entry::{Occupied, Vacant},
     },
     fs::File,
     io::{BufWriter, Write},
@@ -30,18 +30,21 @@ use imessage_database::{
         placemark::PlacemarkMessage,
         sticker::StickerSource,
         url::URLMessage,
-        variants::{Announcement, BalloonProvider, CustomBalloon, URLOverride, Variant},
+        variants::{
+            Announcement, BalloonProvider, CustomBalloon, Tapback, TapbackAction, URLOverride,
+            Variant,
+        },
     },
     tables::{
         attachment::Attachment,
         messages::{
-            models::{AttachmentMeta, BubbleComponent, TextAttributes},
             Message,
+            models::{AttachmentMeta, BubbleComponent, GroupAction, TextAttributes},
         },
-        table::{AttributedBody, Table, FITNESS_RECEIVER, ME, ORPHANED, YOU},
+        table::{AttributedBody, FITNESS_RECEIVER, ME, ORPHANED, Table, YOU},
     },
     util::{
-        dates::{format, get_local_time, readable_diff, TIMESTAMP_FACTOR},
+        dates::{TIMESTAMP_FACTOR, format, get_local_time, readable_diff},
         plist::parse_ns_keyed_archiver,
     },
 };
@@ -470,8 +473,8 @@ impl<'a> Writer<'a> for TXT<'a> {
 
             if let Some(payload) = message.payload_data(&self.config.db) {
                 // Handle URL messages separately since they are a special case
+                let parsed = parse_ns_keyed_archiver(&payload)?;
                 let res = if message.is_url() {
-                    let parsed = parse_ns_keyed_archiver(&payload)?;
                     let bubble = URLMessage::get_url_message_override(&parsed)?;
                     match bubble {
                         URLOverride::Normal(balloon) => self.format_url(message, &balloon, indent),
@@ -487,7 +490,6 @@ impl<'a> Writer<'a> for TXT<'a> {
                 // Handwriting uses a different payload type than the rest of the branches
                 } else {
                     // Handle the app case
-                    let parsed = parse_ns_keyed_archiver(&payload)?;
                     match AppMessage::from_map(&parsed) {
                         Ok(bubble) => match balloon {
                             CustomBalloon::Application(bundle_id) => {
@@ -523,28 +525,36 @@ impl<'a> Writer<'a> for TXT<'a> {
 
     fn format_tapback(&self, msg: &Message) -> Result<String, TableError> {
         match msg.variant() {
-            Variant::Tapback(_, added, tapback) => {
-                if !added {
+            Variant::Tapback(_, action, tapback) => {
+                if let TapbackAction::Removed = action {
                     return Ok(String::new());
                 }
-                Ok(format!(
-                    "{} by {}",
-                    tapback,
-                    self.config
-                        .who(msg.handle_id, msg.is_from_me(), &msg.destination_caller_id),
-                ))
-            }
-            Variant::Sticker(_) => {
-                let mut paths = Attachment::from_message(&self.config.db, msg)?;
-                let who =
-                    self.config
-                        .who(msg.handle_id, msg.is_from_me(), &msg.destination_caller_id);
-                // Sticker messages have only one attachment, the sticker image
-                Ok(if let Some(sticker) = paths.get_mut(0) {
-                    format!("{} from {who}", self.format_sticker(sticker, msg))
-                } else {
-                    format!("Sticker from {who} not found!")
-                })
+
+                match tapback {
+                    Tapback::Sticker => {
+                        let mut paths = Attachment::from_message(&self.config.db, msg)?;
+                        let who = self.config.who(
+                            msg.handle_id,
+                            msg.is_from_me(),
+                            &msg.destination_caller_id,
+                        );
+                        // Sticker messages have only one attachment, the sticker image
+                        Ok(if let Some(sticker) = paths.get_mut(0) {
+                            format!("{} from {who}", self.format_sticker(sticker, msg))
+                        } else {
+                            format!("Sticker from {who} not found!")
+                        })
+                    }
+                    _ => Ok(format!(
+                        "{} by {}",
+                        tapback,
+                        self.config.who(
+                            msg.handle_id,
+                            msg.is_from_me(),
+                            &msg.destination_caller_id
+                        ),
+                    )),
+                }
             }
             _ => unreachable!(),
         }
@@ -587,12 +597,38 @@ impl<'a> Writer<'a> for TXT<'a> {
 
         match msg.get_announcement() {
             Some(announcement) => match announcement {
-                Announcement::NameChange(name) => {
-                    format!("{timestamp} {who} renamed the conversation to {name}\n\n")
-                }
-                Announcement::PhotoChange => {
-                    format!("{timestamp} {who} changed the group photo.\n\n")
-                }
+                Announcement::GroupAction(action) => match action {
+                    GroupAction::ParticipantAdded(person) => {
+                        // We pass false for `is_from_me` because we want to render the name of the added participant, and we cannot add ourselves
+                        let resolved_person =
+                            self.config
+                                .who(Some(person), false, &msg.destination_caller_id);
+                        format!(
+                            "{timestamp} {who} added {resolved_person} to the conversation.\n\n"
+                        )
+                    }
+                    GroupAction::ParticipantRemoved(person) => {
+                        // We pass false for `is_from_me` because we want to render the name of the added participant, and we cannot add ourselves
+                        let resolved_person =
+                            self.config
+                                .who(Some(person), false, &msg.destination_caller_id);
+                        format!(
+                            "{timestamp} {who} removed {resolved_person} from the conversation.\n\n"
+                        )
+                    }
+                    GroupAction::NameChange(name) => {
+                        format!("{timestamp} {who} renamed the conversation to {name}\n\n")
+                    }
+                    GroupAction::ParticipantLeft => {
+                        format!("{timestamp} {who} left the conversation.\n\n")
+                    }
+                    GroupAction::GroupIconChanged => {
+                        format!("{timestamp} {who} changed the group photo.\n\n")
+                    }
+                    GroupAction::GroupIconRemoved => {
+                        format!("{timestamp} {who} removed the group photo.\n\n")
+                    }
+                },
                 Announcement::Unknown(num) => {
                     format!("{timestamp} {who} performed unknown action {num}.\n\n")
                 }
@@ -734,6 +770,14 @@ impl<'a> BalloonFormatter<&'a str> for TXT<'a> {
 
     fn format_music(&self, balloon: &MusicMessage, indent: &str) -> String {
         let mut out_s = String::new();
+
+        if let Some(lyrics) = &balloon.lyrics {
+            self.add_line(&mut out_s, "Lyrics:", indent);
+            for line in lyrics {
+                self.add_line(&mut out_s, line, indent);
+            }
+            self.add_line(&mut out_s, "\n", indent);
+        }
 
         if let Some(track_name) = balloon.track_name {
             self.add_line(&mut out_s, track_name, indent);
@@ -1071,13 +1115,10 @@ impl TXT<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env::{current_dir, set_var},
-        path::PathBuf,
-    };
+    use std::{env::current_dir, path::PathBuf};
 
     use crate::{
-        app::export_type::ExportType, exporters::exporter::Writer, Config, Exporter, Options, TXT,
+        Config, Exporter, Options, TXT, app::export_type::ExportType, exporters::exporter::Writer,
     };
     use imessage_database::{
         tables::{messages::models::AttachmentMeta, table::ME},
@@ -1094,9 +1135,6 @@ mod tests {
 
     #[test]
     fn can_get_time_valid() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1119,9 +1157,6 @@ mod tests {
 
     #[test]
     fn can_get_time_invalid() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1168,9 +1203,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_me_normal() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1191,9 +1223,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_me_normal_deleted() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1207,17 +1236,13 @@ mod tests {
         message.deleted_from = Some(0);
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected =
-            "May 17, 2022  5:29:42 PM\nMe\nThis message was deleted from the conversation!\nHello world\n\n";
+        let expected = "May 17, 2022  5:29:42 PM\nMe\nThis message was deleted from the conversation!\nHello world\n\n";
 
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn can_format_txt_from_me_normal_read() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1240,9 +1265,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_them_normal() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1265,9 +1287,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_them_normal_read() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1287,17 +1306,13 @@ mod tests {
         message.date_read = 674530231992568192;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected =
-            "May 17, 2022  5:29:42 PM (Read by you after 1 hour, 49 seconds)\nSample Contact\nHello world\n\n";
+        let expected = "May 17, 2022  5:29:42 PM (Read by you after 1 hour, 49 seconds)\nSample Contact\nHello world\n\n";
 
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn can_format_txt_from_them_custom_name_read() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.custom_name = Some("Name".to_string());
@@ -1318,17 +1333,13 @@ mod tests {
         message.date_read = 674530231992568192;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected =
-            "May 17, 2022  5:29:42 PM (Read by Name after 1 hour, 49 seconds)\nSample Contact\nHello world\n\n";
+        let expected = "May 17, 2022  5:29:42 PM (Read by Name after 1 hour, 49 seconds)\nSample Contact\nHello world\n\n";
 
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn can_format_txt_shareplay() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1349,9 +1360,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_announcement() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1364,6 +1372,7 @@ mod tests {
         message.date = 674526582885055488;
         message.group_title = Some("Hello world".to_string());
         message.is_from_me = true;
+        message.item_type = 2;
 
         let actual = exporter.format_announcement(&message);
         let expected = "May 17, 2022  5:29:42 PM You renamed the conversation to Hello world\n\n";
@@ -1373,9 +1382,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_announcement_custom_name() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.custom_name = Some("Name".to_string());
@@ -1388,6 +1394,7 @@ mod tests {
         // May 17, 2022  8:29:42 PM
         message.date = 674526582885055488;
         message.group_title = Some("Hello world".to_string());
+        message.item_type = 2;
 
         let actual = exporter.format_announcement(&message);
         let expected = "May 17, 2022  5:29:42 PM Name renamed the conversation to Hello world\n\n";
@@ -1396,10 +1403,125 @@ mod tests {
     }
 
     #[test]
-    fn can_format_txt_tapback_me() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
+    fn can_format_txt_group_removed() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+        config.participants.insert(1, "Other".to_string());
 
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 1;
+        message.group_action_type = 1;
+        message.other_handle = Some(1);
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You removed Other from the conversation.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_group_added() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+        config.participants.insert(1, "Other".to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 1;
+        message.group_action_type = 0;
+        message.other_handle = Some(1);
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You added Other to the conversation.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_group_left() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You left the conversation.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_group_icon_removed() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+        message.group_action_type = 2;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You removed the group photo.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_group_icon_added() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+        message.group_action_type = 1;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You changed the group photo.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_tapback_me() {
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1421,9 +1543,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_them() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1447,9 +1566,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_custom_emoji() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1474,9 +1590,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_custom_sticker() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1491,7 +1604,7 @@ mod tests {
         message.associated_message_type = Some(2007);
         message.associated_message_guid = Some("fake_guid".to_string());
         message.handle_id = Some(999999);
-        message.associated_message_emoji = Some("☕️".to_string());
+        message.num_attachments = 1;
 
         let actual = exporter.format_tapback(&message).unwrap();
         let expected = "Sticker from Sample Contact not found!";
@@ -1500,10 +1613,57 @@ mod tests {
     }
 
     #[test]
-    fn can_format_txt_started_sharing_location_me() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
+    fn can_format_txt_tapback_custom_sticker_exists() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, "Sample Contact".to_string());
+        let exporter = TXT::new(&config).unwrap();
 
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(2007);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.num_attachments = 1;
+        message.rowid = 452567;
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "Sticker from Sample Contact: /Users/chris/Library/Messages/StickerCache/8e682c381ab52ec2-289D9E83-33EE-4153-AF13-43DB31792C6F/289D9E83-33EE-4153-AF13-43DB31792C6F.heic (App: Free People) from Sample Contact";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_tapback_custom_sticker_removed() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config
+            .participants
+            .insert(999999, "Sample Contact".to_string());
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.associated_message_type = Some(3007);
+        message.associated_message_guid = Some("fake_guid".to_string());
+        message.handle_id = Some(999999);
+        message.num_attachments = 1;
+        message.rowid = 452567;
+
+        let actual = exporter.format_tapback(&message).unwrap();
+        let expected = "";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_started_sharing_location_me() {
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1524,9 +1684,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_stopped_sharing_location_me() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1547,9 +1704,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_started_sharing_location_them() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1571,9 +1725,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_stopped_sharing_location_them() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
@@ -1819,9 +1970,7 @@ mod tests {
 
 #[cfg(test)]
 mod balloon_format_tests {
-    use std::env::set_var;
-
-    use crate::{exporters::exporter::BalloonFormatter, Config, Exporter, Options, TXT};
+    use crate::{Config, Exporter, Options, TXT, exporters::exporter::BalloonFormatter};
     use imessage_database::message_types::{
         app::AppMessage,
         app_store::AppStoreMessage,
@@ -1869,10 +2018,33 @@ mod balloon_format_tests {
             artist: Some("artist"),
             album: Some("album"),
             track_name: Some("track_name"),
+            lyrics: None,
         };
 
         let expected = exporter.format_music(&balloon, "");
         let actual = "track_name\nalbum\nartist\nurl\n";
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn can_format_txt_music_lyrics() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = MusicMessage {
+            url: Some("url"),
+            preview: None,
+            artist: Some("artist"),
+            album: Some("album"),
+            track_name: Some("track_name"),
+            lyrics: Some(vec!["a", "b"]),
+        };
+
+        let expected = exporter.format_music(&balloon, "");
+        let actual = "Lyrics:\na\nb\n\n\ntrack_name\nalbum\nartist\nurl\n";
 
         assert_eq!(expected, actual);
     }
@@ -2005,9 +2177,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_check_in_timer() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
         let config = Config::fake_app(options);
@@ -2034,9 +2203,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_check_in_timer_late() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
         let config = Config::fake_app(options);
@@ -2063,9 +2229,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_accepted_check_in() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
         let config = Config::fake_app(options);
@@ -2172,13 +2335,9 @@ mod balloon_format_tests {
 
 #[cfg(test)]
 mod edited_tests {
-    use std::{
-        env::{current_dir, set_var},
-        fs::File,
-        io::Read,
-    };
+    use std::{env::current_dir, fs::File, io::Read};
 
-    use crate::{exporters::exporter::Writer, Config, Exporter, Options, TXT};
+    use crate::{Config, Exporter, Options, TXT, exporters::exporter::Writer};
     use imessage_database::{
         message_types::edited::{EditStatus, EditedMessage, EditedMessagePart},
         util::typedstream::parser::TypedStreamReader,
@@ -2186,9 +2345,6 @@ mod edited_tests {
 
     #[test]
     fn can_format_txt_conversion_final_unsent() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
         let config = Config::fake_app(options);
@@ -2244,9 +2400,6 @@ mod edited_tests {
 
     #[test]
     fn can_format_txt_conversion_no_edits() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
         let config = Config::fake_app(options);
@@ -2281,9 +2434,6 @@ mod edited_tests {
 
     #[test]
     fn can_format_txt_conversion_fully_unsent() {
-        // Set timezone to PST for consistent Local time
-        set_var("TZ", "PST");
-
         // Create exporter
         let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
         let config = Config::fake_app(options);

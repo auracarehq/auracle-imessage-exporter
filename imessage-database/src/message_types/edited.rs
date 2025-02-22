@@ -17,7 +17,10 @@ use crate::{
     },
     util::{
         dates::TIMESTAMP_FACTOR,
-        plist::{extract_array_key, extract_bytes_key, extract_dictionary, extract_int_key},
+        plist::{
+            extract_array_key, extract_bytes_key, extract_dictionary, extract_int_key,
+            plist_as_dictionary,
+        },
         streamtyped::parse,
         typedstream::{models::Archivable, parser::TypedStreamReader},
     },
@@ -133,9 +136,7 @@ pub struct EditedMessage {
 impl<'a> BalloonProvider<'a> for EditedMessage {
     fn from_map(payload: &'a Value) -> Result<Self, PlistParseError> {
         // Parse payload
-        let plist_root = payload.as_dictionary().ok_or_else(|| {
-            PlistParseError::InvalidType("root".to_string(), "dictionary".to_string())
-        })?;
+        let plist_root = plist_as_dictionary(payload)?;
 
         // Get the parts of the message that may have been altered
         let message_parts = extract_dictionary(plist_root, "otr")?;

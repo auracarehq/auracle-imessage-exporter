@@ -78,7 +78,7 @@ pub(super) trait Writer<'a> {
         message_part_idx: usize,
         indent: &str,
     ) -> Option<String>;
-    /// Format all [`TextAttributes`](imessage_database::tables::messages::models::TextAttributes)s applied to a given set of text
+    /// Format all [`TextAttributes`]s applied to a given set of text
     fn format_attributes(&'a self, text: &'a str, attributes: &'a [TextAttributes]) -> String;
     fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError>;
 }
