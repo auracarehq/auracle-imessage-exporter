@@ -12,6 +12,9 @@ This binary is available on [crates.io](https://crates.io/crates/imessage-export
 
 `cargo install imessage-exporter` is the best way to install the app for normal use.
 
+<details><summary>Upgrade steps</summary><p><pre>$ cargo uninstall imessage-exporter
+$ cargo install imessage-exporter</pre></p></details>
+
 <details><summary>Uninstall steps</summary><p><pre>$ cargo uninstall imessage-exporter</pre></p><p>Optional: uninstall Rust<pre>$ rustup self uninstall</pre></p></details>
 
 ### Homebrew
@@ -20,11 +23,15 @@ This binary is available via [`brew`](https://formulae.brew.sh/formula/imessage-
 
 `brew install imessage-exporter` will install the app, but it may not be up to date with the latest release.
 
+<details><summary>Upgrade steps</summary><p><pre>$ brew upgrade</pre></p></details>
+
 <details><summary>Uninstall steps</summary><p><pre>$ brew uninstall imessage-exporter</pre></p></details>
 
 ### Prebuilt Binaries
 
 The [releases page](https://github.com/ReagentX/imessage-exporter/releases) provides prebuilt binaries for both Apple Silicon and Intel-based Macs.
+
+<details><summary>Upgrade steps</summary><p>Download new versions as available</p></details>
 
 <details><summary>Uninstall steps</summary><p><pre>$ rm path/to/imessage-exporter-binary</pre></p></details>
 
@@ -190,6 +197,28 @@ In HTML exports in Safari, when referencing files in-place, you must permit Safa
 Further, since the files are stored in `~/Library`, you will need to grant your browser Full Disk Access in System Settings.
 
 Note: This is not required when passing a valid `--copy-method`.
+
+#### Custom Styling for HTML Exports
+
+You can customize the appearance of HTML exports by creating your own CSS file:
+
+1. Create a file named `style.css` in the same directory as your exported files
+2. Add your custom styles to this file
+3. These styles will be automatically applied to your exported HTML files
+
+Since custom styles are loaded after the default styles, they should automatically override rules with the same specificity.
+
+##### Example Custom CSS
+
+For example, to prevent messages from breaking across pages when printing:
+
+```css
+.message {
+    break-inside: avoid;
+}
+```
+
+The default styles can be viewed [here](/imessage-exporter/src/exporters/resources/style.css).
 
 ### PDF Exports
 

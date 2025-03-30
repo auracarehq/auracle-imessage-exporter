@@ -596,44 +596,41 @@ impl<'a> Writer<'a> for TXT<'a> {
         let timestamp = format(&msg.date(&self.config.offset));
 
         match msg.get_announcement() {
-            Some(announcement) => match announcement {
-                Announcement::GroupAction(action) => match action {
-                    GroupAction::ParticipantAdded(person) => {
-                        // We pass false for `is_from_me` because we want to render the name of the added participant, and we cannot add ourselves
-                        let resolved_person =
-                            self.config
-                                .who(Some(person), false, &msg.destination_caller_id);
-                        format!(
-                            "{timestamp} {who} added {resolved_person} to the conversation.\n\n"
-                        )
-                    }
-                    GroupAction::ParticipantRemoved(person) => {
-                        // We pass false for `is_from_me` because we want to render the name of the added participant, and we cannot add ourselves
-                        let resolved_person =
-                            self.config
-                                .who(Some(person), false, &msg.destination_caller_id);
-                        format!(
-                            "{timestamp} {who} removed {resolved_person} from the conversation.\n\n"
-                        )
-                    }
-                    GroupAction::NameChange(name) => {
-                        format!("{timestamp} {who} renamed the conversation to {name}\n\n")
-                    }
-                    GroupAction::ParticipantLeft => {
-                        format!("{timestamp} {who} left the conversation.\n\n")
-                    }
-                    GroupAction::GroupIconChanged => {
-                        format!("{timestamp} {who} changed the group photo.\n\n")
-                    }
-                    GroupAction::GroupIconRemoved => {
-                        format!("{timestamp} {who} removed the group photo.\n\n")
-                    }
-                },
-                Announcement::Unknown(num) => {
-                    format!("{timestamp} {who} performed unknown action {num}.\n\n")
-                }
-                Announcement::FullyUnsent => format!("{timestamp} {who} unsent a message!\n\n"),
-            },
+            Some(announcement) => {
+                let action_text = match announcement {
+                    Announcement::GroupAction(action) => match action {
+                        GroupAction::ParticipantAdded(person)
+                        | GroupAction::ParticipantRemoved(person) => {
+                            let resolved_person =
+                                self.config
+                                    .who(Some(person), false, &msg.destination_caller_id);
+                            let action_word = if matches!(action, GroupAction::ParticipantAdded(_))
+                            {
+                                "added"
+                            } else {
+                                "removed"
+                            };
+                            format!(
+                                "{action_word} {resolved_person} {} the conversation.",
+                                if matches!(action, GroupAction::ParticipantAdded(_)) {
+                                    "to"
+                                } else {
+                                    "from"
+                                }
+                            )
+                        }
+                        GroupAction::NameChange(name) => {
+                            format!("renamed the conversation to {name}")
+                        }
+                        GroupAction::ParticipantLeft => "left the conversation.".to_string(),
+                        GroupAction::GroupIconChanged => "changed the group photo.".to_string(),
+                        GroupAction::GroupIconRemoved => "removed the group photo.".to_string(),
+                    },
+                    Announcement::Unknown(num) => format!("performed unknown action {num}"),
+                    Announcement::FullyUnsent => "unsent a message!".to_string(),
+                };
+                format!("{timestamp} {who} {action_text}\n\n")
+            }
             None => String::from("Unable to format announcement!\n\n"),
         }
     }
@@ -1115,7 +1112,7 @@ impl TXT<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env::current_dir, path::PathBuf};
+    use std::env::current_dir;
 
     use crate::{
         Config, Exporter, Options, TXT, app::export_type::ExportType, exporters::exporter::Writer,
@@ -1841,7 +1838,7 @@ mod tests {
             .unwrap()
             .join("imessage-database/test_data/stickers/outline.heic");
         attachment.filename = Some(sticker_path.to_string_lossy().to_string());
-        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.copied_path = Some(sticker_path);
 
         let actual = exporter.format_sticker(&mut attachment, &message);
 
@@ -1882,7 +1879,7 @@ mod tests {
             .unwrap()
             .join("imessage-database/test_data/stickers/outline.heic");
         attachment.filename = Some(sticker_path.to_string_lossy().to_string());
-        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.copied_path = Some(sticker_path);
 
         let actual = exporter.format_sticker(&mut attachment, &message);
 
@@ -1922,7 +1919,7 @@ mod tests {
             .unwrap()
             .join("imessage-database/test_data/stickers/outline.heic");
         attachment.filename = Some(sticker_path.to_string_lossy().to_string());
-        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.copied_path = Some(sticker_path);
 
         let actual = exporter.format_sticker(&mut attachment, &message);
 

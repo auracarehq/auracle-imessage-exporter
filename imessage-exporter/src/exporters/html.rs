@@ -581,10 +581,22 @@ impl<'a> Writer<'a> for HTML<'a> {
                 attachment.file_size()
             ),
             MediaType::Unknown => {
-                format!(
-                    "<p>Unknown attachment type: {embed_path}</p> <a href=\"{embed_path}\">Download ({})</a>",
-                    attachment.file_size()
-                )
+                if attachment
+                    .copied_path
+                    .as_ref()
+                    .is_some_and(|path| path.is_dir())
+                {
+                    format!(
+                        "<p>Folder: <i>{}</i> ({}) <a href=\"{embed_path}\">Click to open</a></p>",
+                        attachment.filename(),
+                        attachment.file_size()
+                    )
+                } else {
+                    format!(
+                        "<p>Unknown attachment type: {embed_path}</p> <a href=\"{embed_path}\">Download ({})</a>",
+                        attachment.file_size()
+                    )
+                }
             }
             MediaType::Other(media_type) => {
                 format!("<p>Unable to embed {media_type} attachments: {embed_path}</p>")
@@ -806,59 +818,51 @@ impl<'a> Writer<'a> for HTML<'a> {
         let timestamp = format(&msg.date(&self.config.offset));
 
         match msg.get_announcement() {
-            Some(announcement) => match announcement {
-                Announcement::GroupAction(action) => match action {
-                    GroupAction::ParticipantAdded(person) => {
-                        // We pass false for `is_from_me` because we want to render the name of the added participant, and we cannot add ourselves
-                        let resolved_person =
-                            self.config
-                                .who(Some(person), false, &msg.destination_caller_id);
-                        format!(
-                            "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} added {resolved_person} to the conversation.</p></div>\n"
-                        )
-                    }
-                    GroupAction::ParticipantRemoved(person) => {
-                        // We pass false for `is_from_me` because we want to render the name of the added participant, and we cannot add ourselves
-                        let resolved_person =
-                            self.config
-                                .who(Some(person), false, &msg.destination_caller_id);
-                        format!(
-                            "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} removed {resolved_person} from the conversation.</p></div>\n"
-                        )
-                    }
-                    GroupAction::NameChange(name) => {
-                        let clean_name = sanitize_html(name);
-                        format!(
-                            "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} named the conversation <b>{clean_name}</b></p></div>\n"
-                        )
-                    }
-                    GroupAction::ParticipantLeft => {
-                        format!(
-                            "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} left the conversation.</p></div>\n"
-                        )
-                    }
-                    GroupAction::GroupIconChanged => {
-                        format!(
-                            "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} changed the group photo.</p></div>\n"
-                        )
-                    }
-                    GroupAction::GroupIconRemoved => {
-                        format!(
-                            "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} removed the group photo.</p></div>\n"
-                        )
-                    }
-                },
-                Announcement::Unknown(num) => {
-                    format!(
-                        "\n<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} performed unknown action {num}</p></div>\n"
-                    )
-                }
-                Announcement::FullyUnsent => {
-                    format!(
-                        "<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} unsent a message.</p></div>"
-                    )
-                }
-            },
+            Some(announcement) => {
+                let action_text = match &announcement {
+                    Announcement::GroupAction(action) => match action {
+                        GroupAction::ParticipantAdded(person)
+                        | GroupAction::ParticipantRemoved(person) => {
+                            let resolved_person =
+                                self.config
+                                    .who(Some(*person), false, &msg.destination_caller_id);
+                            let action_word = if matches!(action, GroupAction::ParticipantAdded(_))
+                            {
+                                "added"
+                            } else {
+                                "removed"
+                            };
+                            format!(
+                                "{action_word} {resolved_person} {} the conversation.",
+                                if matches!(action, GroupAction::ParticipantAdded(_)) {
+                                    "to"
+                                } else {
+                                    "from"
+                                }
+                            )
+                        }
+                        GroupAction::NameChange(name) => {
+                            let clean_name = sanitize_html(name);
+                            format!("named the conversation <b>{clean_name}</b>")
+                        }
+                        GroupAction::ParticipantLeft => "left the conversation.".to_string(),
+                        GroupAction::GroupIconChanged => "changed the group photo.".to_string(),
+                        GroupAction::GroupIconRemoved => "removed the group photo.".to_string(),
+                    },
+                    Announcement::Unknown(num) => format!("performed unknown action {num}"),
+                    Announcement::FullyUnsent => "unsent a message.".to_string(),
+                };
+
+                let newlines = if matches!(announcement, Announcement::FullyUnsent) {
+                    ""
+                } else {
+                    "\n"
+                };
+
+                format!(
+                    "{newlines}<div class =\"announcement\"><p><span class=\"timestamp\">{timestamp}</span> {who} {action_text}</p></div>{newlines}"
+                )
+            }
             None => String::from(
                 "\n<div class =\"announcement\"><p>Unable to format announcement!</p></div>\n",
             ),
@@ -1561,6 +1565,7 @@ impl HTML<'_> {
         HTML::write_to_file(file, "<style>\n")?;
         HTML::write_to_file(file, STYLE)?;
         HTML::write_to_file(file, "\n</style>")?;
+        HTML::write_to_file(file, "<link rel=\"stylesheet\" href=\"style.css\">")?;
         HTML::write_to_file(file, "\n</head>\n<body>\n")?;
         Ok(())
     }
@@ -2414,6 +2419,57 @@ mod tests {
     }
 
     #[test]
+    fn can_format_html_attachment_folder() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let message = Config::fake_message();
+
+        let mut attachment = Config::fake_attachment();
+        let folder_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/");
+        attachment.mime_type = None;
+        attachment.transfer_name = Some("test_data".to_string());
+        attachment.copied_path = Some(folder_path);
+
+        let actual = exporter
+            .format_attachment(&mut attachment, &message, &AttachmentMeta::default())
+            .unwrap();
+
+        assert!(actual.starts_with("<p>Folder: <i>test_data</i> (100.00 B) <a href="));
+    }
+
+    #[test]
+    fn can_format_html_attachment_unknown() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let message = Config::fake_message();
+
+        let mut attachment = Config::fake_attachment();
+        let folder_path = "Fake";
+        attachment.mime_type = None;
+        attachment.transfer_name = Some("test_data".to_string());
+        attachment.copied_path = Some(PathBuf::from(folder_path));
+
+        let actual = exporter
+            .format_attachment(&mut attachment, &message, &AttachmentMeta::default())
+            .unwrap();
+
+        assert_eq!(
+            actual,
+            "<p>Unknown attachment type: Fake</p> <a href=\"Fake\">Download (100.00 B)</a>"
+        );
+    }
+
+    #[test]
     fn can_format_html_attachment_sticker() {
         // Create exporter
         let mut options = Options::fake_options(ExportType::Html);
@@ -2433,7 +2489,7 @@ mod tests {
             .unwrap()
             .join("imessage-database/test_data/stickers/outline.heic");
         attachment.filename = Some(sticker_path.to_string_lossy().to_string());
-        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.copied_path = Some(sticker_path);
 
         let actual = exporter.format_sticker(&mut attachment, &message);
 
@@ -2471,7 +2527,7 @@ mod tests {
             .unwrap()
             .join("imessage-database/test_data/stickers/outline.heic");
         attachment.filename = Some(sticker_path.to_string_lossy().to_string());
-        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.copied_path = Some(sticker_path);
         attachment.emoji_description = Some("pink poodle".to_string());
 
         let actual = exporter.format_sticker(&mut attachment, &message);
@@ -2510,7 +2566,7 @@ mod tests {
             .unwrap()
             .join("imessage-database/test_data/stickers/outline.heic");
         attachment.filename = Some(sticker_path.to_string_lossy().to_string());
-        attachment.copied_path = Some(PathBuf::from(sticker_path.to_string_lossy().to_string()));
+        attachment.copied_path = Some(sticker_path);
 
         let actual = exporter.format_sticker(&mut attachment, &message);
 

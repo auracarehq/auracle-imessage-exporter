@@ -14,11 +14,11 @@ use fs2::available_space;
 use rusqlite::Connection;
 
 use crate::{
+    Exporter, HTML, TXT,
     app::{
         compatibility::attachment_manager::AttachmentManagerMode, error::RuntimeError,
         export_type::ExportType, options::Options, sanitizers::sanitize_filename,
     },
-    Exporter, HTML, TXT,
 };
 
 use imessage_database::{
@@ -30,8 +30,8 @@ use imessage_database::{
         handle::Handle,
         messages::Message,
         table::{
-            get_connection, get_db_size, Cacheable, Deduplicate, Diagnostic, ATTACHMENTS_DIR, ME,
-            ORPHANED, UNKNOWN,
+            ATTACHMENTS_DIR, Cacheable, Deduplicate, Diagnostic, ME, ORPHANED, UNKNOWN,
+            get_connection, get_db_size,
         },
     },
     util::{dates::get_offset, size::format_file_size},
@@ -43,7 +43,7 @@ const MAX_LENGTH: usize = 235;
 pub struct Config {
     /// Map of chatroom ID to chatroom information
     pub chatrooms: HashMap<i32, Chat>,
-    // Map of chatroom ID to an internal unique chatroom ID
+    /// Map of chatroom ID to an internal unique chatroom ID
     pub real_chatrooms: HashMap<i32, i32>,
     /// Map of chatroom ID to chatroom participants
     pub chatroom_participants: HashMap<i32, BTreeSet<i32>>,
@@ -544,7 +544,7 @@ impl Config {
 
 #[cfg(test)]
 mod filename_tests {
-    use crate::{app::runtime::MAX_LENGTH, Config, Options};
+    use crate::{Config, Options, app::runtime::MAX_LENGTH};
 
     use imessage_database::tables::chat::Chat;
 
@@ -673,7 +673,10 @@ mod filename_tests {
 
         // Get filename
         let filename = app.filename(&chat);
-        assert_eq!(filename, "Life is infinitely stranger than anything which the mind of man could invent. We would not dare to conceive the things which are really mere commonplaces of existence. If we could fly out of that window hand in hand, hover over this gr - 0.html");
+        assert_eq!(
+            filename,
+            "Life is infinitely stranger than anything which the mind of man could invent. We would not dare to conceive the things which are really mere commonplaces of existence. If we could fly out of that window hand in hand, hover over this gr - 0.html"
+        );
     }
 
     #[test]
@@ -1020,7 +1023,7 @@ mod directory_tests {
 mod chat_filter_tests {
     use std::collections::BTreeSet;
 
-    use crate::{app::export_type::ExportType, Config, Options};
+    use crate::{Config, Options, app::export_type::ExportType};
 
     #[test]
     fn can_generate_filter_string_multiple() {

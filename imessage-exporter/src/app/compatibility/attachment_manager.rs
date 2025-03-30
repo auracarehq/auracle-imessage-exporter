@@ -27,7 +27,7 @@ use imessage_database::{
     },
 };
 
-use filetime::{set_file_times, FileTime};
+use filetime::{FileTime, set_file_times};
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct AttachmentManager {
@@ -154,7 +154,9 @@ impl AttachmentManager {
             to.push(attachment.rowid.to_string());
 
             // Set the new file's extension to the original one
-            to.set_extension(attachment.extension()?);
+            if !from.is_dir() {
+                to.set_extension(attachment.extension()?);
+            }
 
             // If the same file was referenced more than once, i.e. in a reply or response that we render twice, escape early
             if to.exists() {
