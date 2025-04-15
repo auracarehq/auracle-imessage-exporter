@@ -159,7 +159,7 @@ fn get_bubble_type<'a>(
                 "__kIMFileTransferGUIDAttributeName" => {
                     return Some(BubbleResult::New(BubbleComponent::Attachment(
                         AttachmentMeta::from_components(components)?,
-                    )))
+                    )));
                 }
                 "__kIMMentionConfirmedMention" => {
                     return Some(BubbleResult::Continuation(TextAttributes::new(
@@ -294,9 +294,9 @@ mod typedstream_tests {
             text_effects::{Animation, Style, TextEffect, Unit},
         },
         tables::messages::{
+            Message,
             body::parse_body_typedstream,
             models::{AttachmentMeta, BubbleComponent, TextAttributes},
-            Message,
         },
         util::typedstream::parser::TypedStreamReader,
     };
@@ -1138,8 +1138,83 @@ mod typedstream_tests {
             vec![BubbleComponent::Text(vec![TextAttributes::new(
                 0,
                 3,
-                TextEffect::Link("https://music.apple.com/us/lyrics/1329891623?ts=11.108&te=16.031&l=en&tk=2.v1.VsuX9f%2BaT1PyrgMgIT7ANQ%3D%3D&itsct=sharing_msg_lyrics&itscg=50401")
+                TextEffect::Link(
+                    "https://music.apple.com/us/lyrics/1329891623?ts=11.108&te=16.031&l=en&tk=2.v1.VsuX9f%2BaT1PyrgMgIT7ANQ%3D%3D&itsct=sharing_msg_lyrics&itscg=50401"
+                )
             ),])]
+        );
+    }
+
+    #[test]
+    fn can_get_message_body_multiple_attachment() {
+        let mut m = Message::blank();
+        m.text = Some("\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}\u{FFFC}".to_string());
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .as_path()
+            .join("test_data/typedstream/MultiAttachment");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        m.components = parser.parse().ok();
+
+        parse_body_typedstream(
+            m.components.as_ref(),
+            m.text.as_deref(),
+            m.edited_parts.as_ref(),
+        )
+        .unwrap()
+        .iter()
+        .enumerate()
+        .for_each(|(idx, item)| println!("\t{idx}: {item:#?}"));
+
+        assert_eq!(
+            parse_body_typedstream(
+                m.components.as_ref(),
+                m.text.as_deref(),
+                m.edited_parts.as_ref()
+            )
+            .unwrap()[..5],
+            vec![
+                BubbleComponent::Attachment(AttachmentMeta {
+                    guid: Some("at_0_48B9C973-3466-438C-BE72-E5B498D30772"),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None
+                }),
+                BubbleComponent::Attachment(AttachmentMeta {
+                    guid: Some("at_1_48B9C973-3466-438C-BE72-E5B498D30772"),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None
+                }),
+                BubbleComponent::Attachment(AttachmentMeta {
+                    guid: Some("at_2_48B9C973-3466-438C-BE72-E5B498D30772"),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None
+                }),
+                BubbleComponent::Attachment(AttachmentMeta {
+                    guid: Some("at_3_48B9C973-3466-438C-BE72-E5B498D30772"),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None
+                }),
+                BubbleComponent::Attachment(AttachmentMeta {
+                    guid: Some("at_4_48B9C973-3466-438C-BE72-E5B498D30772"),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None
+                })
+            ]
         );
     }
 }
@@ -1149,9 +1224,9 @@ mod legacy_tests {
     use crate::{
         message_types::text_effects::TextEffect,
         tables::messages::{
+            Message,
             body::parse_body_legacy,
             models::{AttachmentMeta, BubbleComponent, TextAttributes},
-            Message,
         },
     };
 

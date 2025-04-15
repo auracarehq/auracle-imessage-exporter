@@ -153,8 +153,8 @@ impl AttachmentManager {
             // Add a stable filename
             to.push(attachment.rowid.to_string());
 
-            // Set the new file's extension to the original one
-            if !from.is_dir() {
+            // Set the new file's extension to the original one, if provided
+            if !from.is_dir() && from.extension().is_some() {
                 to.set_extension(attachment.extension()?);
             }
 

@@ -3,7 +3,7 @@
 */
 
 use plist::Value;
-use rusqlite::{blob::Blob, Connection, Error, Result, Row, Statement};
+use rusqlite::{Connection, Error, Result, Row, Statement, blob::Blob};
 use sha1::{Digest, Sha1};
 
 use std::{
@@ -14,10 +14,10 @@ use std::{
 
 use crate::{
     error::{attachment::AttachmentError, table::TableError},
-    message_types::sticker::{get_sticker_effect, StickerEffect, StickerSource},
+    message_types::sticker::{StickerEffect, StickerSource, get_sticker_effect},
     tables::{
         messages::Message,
-        table::{GetBlob, Table, ATTACHMENT, ATTRIBUTION_INFO, STICKER_USER_INFO},
+        table::{ATTACHMENT, ATTRIBUTION_INFO, GetBlob, STICKER_USER_INFO, Table},
     },
     util::{
         dates::TIMESTAMP_FACTOR,
@@ -126,16 +126,13 @@ impl Table for Attachment {
 impl GetBlob for Attachment {
     /// Extract a blob of data that belongs to a single attachment from a given column
     fn get_blob<'a>(&self, db: &'a Connection, column: &str) -> Option<Blob<'a>> {
-        match db.blob_open(
+        db.blob_open(
             rusqlite::DatabaseName::Main,
             ATTACHMENT,
             column,
             self.rowid as i64,
             true,
-        ) {
-            Ok(blob) => Some(blob),
-            Err(_) => None,
-        }
+        ).ok()
     }
 }
 
@@ -297,7 +294,7 @@ impl Attachment {
 
     /// Get a human readable file size for an attachment using [`format_file_size`]
     pub fn file_size(&self) -> String {
-        format_file_size(self.total_bytes.try_into().unwrap_or(0))
+        format_file_size(u64::try_from(self.total_bytes).unwrap_or(0))
     }
 
     /// Get the total attachment bytes referenced in the table
@@ -331,7 +328,7 @@ impl Attachment {
         };
         bytes_query
             .query_row([], |r| -> Result<i64> { r.get(0) })
-            .map(|res: i64| res.try_into().unwrap_or(0))
+            .map(|res: i64| u64::try_from(res).unwrap_or(0))
             .map_err(TableError::Attachment)
     }
 
@@ -540,7 +537,7 @@ impl Attachment {
 mod tests {
     use crate::{
         tables::{
-            attachment::{Attachment, MediaType, DEFAULT_ATTACHMENT_ROOT},
+            attachment::{Attachment, DEFAULT_ATTACHMENT_ROOT, MediaType},
             table::get_connection,
         },
         util::{platform::Platform, query_context::QueryContext},
@@ -693,10 +690,12 @@ mod tests {
         let mut attachment = sample_attachment();
         attachment.filename = Some("~/a/b/c~d.png".to_string());
 
-        assert!(attachment
-            .resolved_attachment_path(&Platform::macOS, &db_path, None)
-            .unwrap()
-            .ends_with("c~d.png"));
+        assert!(
+            attachment
+                .resolved_attachment_path(&Platform::macOS, &db_path, None)
+                .unwrap()
+                .ends_with("c~d.png")
+        );
     }
 
     #[test]

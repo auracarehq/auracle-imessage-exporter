@@ -130,7 +130,7 @@ fn follow_uid<'a>(
                     let key = extract_string_idx(objects, key_index)?;
 
                     dictionary.insert(
-                        key.into(),
+                        String::from(key),
                         follow_uid(objects, value_index, Some(key), None)?,
                     );
                 }
@@ -145,13 +145,16 @@ fn follow_uid<'a>(
                     // If the value is a pointer, follow it
                     if let Some(idx) = val.as_uid() {
                         dictionary.insert(
-                            key.into(),
+                            String::from(key),
                             follow_uid(objects, idx.get() as usize, Some(key), None)?,
                         );
                     }
                     // If the value is not a pointer, try and follow the data itself
                     else if let Some(p) = parent {
-                        dictionary.insert(p.into(), follow_uid(objects, root, Some(p), Some(val))?);
+                        dictionary.insert(
+                            String::from(p),
+                            follow_uid(objects, root, Some(p), Some(val))?,
+                        );
                     }
                 }
             }

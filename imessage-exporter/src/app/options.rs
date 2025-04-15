@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use clap::{crate_version, Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command, crate_version};
 
 use imessage_database::{
     tables::{attachment::DEFAULT_ATTACHMENT_ROOT, table::DEFAULT_PATH_IOS},
@@ -221,10 +221,11 @@ impl Options {
 
         // Build the Platform
         let platform = match platform_type {
-            Some(platform_str) => Platform::from_cli(platform_str).ok_or(
-                RuntimeError::InvalidOptions(format!(
-                "{platform_str} is not a valid platform! Must be one of <{SUPPORTED_PLATFORMS}>")),
-            )?,
+            Some(platform_str) => {
+                Platform::from_cli(platform_str).ok_or(RuntimeError::InvalidOptions(format!(
+                    "{platform_str} is not a valid platform! Must be one of <{SUPPORTED_PLATFORMS}>"
+                )))?
+            }
             None => Platform::determine(&db_path),
         };
 
@@ -241,7 +242,8 @@ impl Options {
         // Warn the user that custom attachment roots have no effect on iOS backups
         if attachment_root.is_some() && platform == Platform::iOS {
             eprintln!(
-                "Option {OPTION_ATTACHMENT_ROOT} is enabled, but the platform is {}, so the root will have no effect!", Platform::iOS
+                "Option {OPTION_ATTACHMENT_ROOT} is enabled, but the platform is {}, so the root will have no effect!",
+                Platform::iOS
             );
         }
 
@@ -492,7 +494,7 @@ mod arg_tests {
     use crate::app::{
         compatibility::attachment_manager::{AttachmentManager, AttachmentManagerMode},
         export_type::ExportType,
-        options::{get_command, validate_path, Options},
+        options::{Options, get_command, validate_path},
     };
 
     #[test]
@@ -972,7 +974,7 @@ mod path_tests {
 
     use crate::app::{
         export_type::ExportType,
-        options::{validate_path, DEFAULT_OUTPUT_DIR},
+        options::{DEFAULT_OUTPUT_DIR, validate_path},
     };
     use imessage_database::util::dirs::home;
 

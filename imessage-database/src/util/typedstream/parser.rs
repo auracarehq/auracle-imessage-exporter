@@ -87,8 +87,7 @@ impl<'a> TypedStreamReader<'a> {
                 let size = 2;
                 self.idx += 1;
                 let value = i16::from_le_bytes(
-                    self.read_exact_bytes(size)?
-                        .try_into()
+                    <[u8; 2]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
                 Ok(value as i64)
@@ -97,8 +96,7 @@ impl<'a> TypedStreamReader<'a> {
                 let size = 4;
                 self.idx += 1;
                 let value = i32::from_le_bytes(
-                    self.read_exact_bytes(size)?
-                        .try_into()
+                    <[u8; 4]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
                 Ok(value as i64)
@@ -123,8 +121,7 @@ impl<'a> TypedStreamReader<'a> {
                 let size = 2;
                 self.idx += 1;
                 let value = u16::from_le_bytes(
-                    self.read_exact_bytes(size)?
-                        .try_into()
+                    <[u8; 2]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
                 Ok(value as u64)
@@ -133,8 +130,7 @@ impl<'a> TypedStreamReader<'a> {
                 let size = 4;
                 self.idx += 1;
                 let value = u32::from_le_bytes(
-                    self.read_exact_bytes(size)?
-                        .try_into()
+                    <[u8; 4]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
                 Ok(value as u64)
@@ -154,8 +150,7 @@ impl<'a> TypedStreamReader<'a> {
                 let size = 4;
                 self.idx += 1;
                 let value = f32::from_le_bytes(
-                    self.read_exact_bytes(size)?
-                        .try_into()
+                    <[u8; 4]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
                 Ok(value)
@@ -175,8 +170,7 @@ impl<'a> TypedStreamReader<'a> {
                 let size = 8;
                 self.idx += 1;
                 let value = f64::from_le_bytes(
-                    self.read_exact_bytes(size)?
-                        .try_into()
+                    <[u8; 8]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
                 Ok(value)
@@ -364,6 +358,9 @@ impl<'a> TypedStreamReader<'a> {
                 if embedded {
                     self.object_table
                         .push(Archivable::Type(object_types.clone()));
+                    // We only want to include the first embedded reference tag, not subsequent references to the same embed
+                    self.seen_embedded_types
+                        .insert(self.object_table.len().saturating_sub(1) as u32);
                 }
                 self.types_table.push(object_types);
                 Ok(self.types_table.last().cloned())

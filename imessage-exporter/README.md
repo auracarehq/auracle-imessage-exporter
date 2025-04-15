@@ -31,7 +31,7 @@ This binary is available via [`brew`](https://formulae.brew.sh/formula/imessage-
 
 The [releases page](https://github.com/ReagentX/imessage-exporter/releases) provides prebuilt binaries for both Apple Silicon and Intel-based Macs.
 
-<details><summary>Upgrade steps</summary><p>Download new versions as available</p></details>
+<details><summary>Upgrade steps</summary><p>Download new releases as available</p></details>
 
 <details><summary>Uninstall steps</summary><p><pre>$ rm path/to/imessage-exporter-binary</pre></p></details>
 

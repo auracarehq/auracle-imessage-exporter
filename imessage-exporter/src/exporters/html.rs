@@ -10,8 +10,8 @@ use std::{
 
 use crate::{
     app::{
-        error::RuntimeError, progress::build_progress_bar_export, runtime::Config,
-        sanitizers::sanitize_html,
+        compatibility::attachment_manager::AttachmentManagerMode, error::RuntimeError,
+        progress::ExportProgress, runtime::Config, sanitizers::sanitize_html,
     },
     exporters::exporter::{BalloonFormatter, Exporter, TextEffectFormatter, Writer},
 };
@@ -62,6 +62,8 @@ pub struct HTML<'a> {
     pub files: HashMap<String, BufWriter<File>>,
     /// Writer instance for orphaned messages
     pub orphaned: BufWriter<File>,
+    /// Progress Bar model for alerting the user about current export state
+    pb: ExportProgress,
 }
 
 impl<'a> Exporter<'a> for HTML<'a> {
@@ -79,6 +81,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
             config,
             files: HashMap::new(),
             orphaned: BufWriter::new(file),
+            pb: ExportProgress::new(),
         })
     }
 
@@ -100,7 +103,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
         let total_messages =
             Message::get_count(&self.config.db, &self.config.options.query_context)
                 .map_err(RuntimeError::DatabaseError)?;
-        let pb = build_progress_bar_export(total_messages);
+        self.pb.start(total_messages);
 
         let mut statement =
             Message::stream_rows(&self.config.db, &self.config.options.query_context)
@@ -138,10 +141,10 @@ impl<'a> Exporter<'a> for HTML<'a> {
             }
             current_message += 1;
             if current_message % 99 == 0 {
-                pb.set_position(current_message);
+                self.pb.set_position(current_message);
             }
         }
-        pb.finish();
+        self.pb.finish();
 
         eprintln!("Writing HTML footers...");
         for (_, buf) in self.files.iter_mut() {
@@ -536,12 +539,28 @@ impl<'a> Writer<'a> for HTML<'a> {
         message: &Message,
         metadata: &AttachmentMeta,
     ) -> Result<String, &'a str> {
+        // When encoding videos, alert the user that the time estimate may be inaccurate
+        let will_encode = matches!(attachment.mime_type(), MediaType::Video(_))
+            && matches!(
+                self.config.options.attachment_manager.mode,
+                AttachmentManagerMode::Full
+            );
+
+        if will_encode {
+            self.pb
+                .set_busy_style("Encoding video, estimates may become inaccurate...".to_string());
+        }
+
         // Copy the file, if requested
         self.config
             .options
             .attachment_manager
             .handle_attachment(message, attachment, self.config)
             .ok_or(attachment.filename())?;
+
+        if will_encode {
+            self.pb.set_default_style();
+        }
 
         // Build a relative filepath from the fully qualified one on the `Attachment`
         let embed_path = self.config.message_attachment_path(attachment);
