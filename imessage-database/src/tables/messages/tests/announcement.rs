@@ -281,4 +281,15 @@ mod announcement_tests {
 
         assert!(msg.get_announcement().is_none());
     }
+
+    #[test]
+    fn test_announcement_kept_audio_message() {
+        let mut msg = Message::blank();
+        msg.item_type = 5;
+
+        assert!(matches!(
+            msg.get_announcement(),
+            Some(Announcement::AudioMessageKept)
+        ));
+    }
 }

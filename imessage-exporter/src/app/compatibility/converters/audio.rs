@@ -23,7 +23,11 @@ pub(crate) fn audio_copy_convert(
 ) -> Option<MediaType<'static>> {
     if matches!(
         mime_type,
-        MediaType::Audio("caf") | MediaType::Audio("CAF") | MediaType::Audio("x-caf; codecs=opus")
+        MediaType::Audio("caf")
+            | MediaType::Audio("CAF")
+            | MediaType::Audio("x-caf; codecs=opus")
+            | MediaType::Audio("amr")
+            | MediaType::Audio("AMR")
     ) {
         let output_type = AudioType::Mp4;
 

@@ -288,7 +288,7 @@ impl<'a> Writer<'a> for HTML<'a> {
 
         // Add message subject
         if let Some(subject) = &message.subject {
-            // Add message sender
+            // Add message subject
             self.add_line(
                 &mut formatted_message,
                 &sanitize_html(subject),
@@ -868,8 +868,9 @@ impl<'a> Writer<'a> for HTML<'a> {
                         GroupAction::GroupIconChanged => "changed the group photo.".to_string(),
                         GroupAction::GroupIconRemoved => "removed the group photo.".to_string(),
                     },
-                    Announcement::Unknown(num) => format!("performed unknown action {num}"),
+                    Announcement::AudioMessageKept => "kept an audio message.".to_string(),
                     Announcement::FullyUnsent => "unsent a message.".to_string(),
+                    Announcement::Unknown(num) => format!("performed unknown action {num}"),
                 };
 
                 let newlines = if matches!(announcement, Announcement::FullyUnsent) {
@@ -2135,6 +2136,27 @@ mod tests {
 
         let actual = exporter.format_announcement(&message);
         let expected = "\n<div class =\"announcement\"><p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span> You changed the group photo.</p></div>\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_audio_message_kept() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.is_from_me = true;
+        message.item_type = 5;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "\n<div class =\"announcement\"><p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span> You kept an audio message.</p></div>\n";
 
         assert_eq!(actual, expected);
     }

@@ -440,7 +440,8 @@ impl GetBlob for Message {
             column,
             self.rowid as i64,
             true,
-        ).ok()
+        )
+        .ok()
     }
 }
 
@@ -636,6 +637,11 @@ impl Message {
     /// `true` if the message begins a thread, else `false`
     pub fn has_replies(&self) -> bool {
         self.num_replies > 0
+    }
+
+    /// `true` if the message indicates a sent audio message was kept, else `false`
+    pub fn is_kept_audio_message(&self) -> bool {
+        self.item_type == 5
     }
 
     /// `true` if the message is a [SharePlay/FaceTime](crate::message_types::variants::Variant::SharePlay) message, else `false`
@@ -1029,6 +1035,10 @@ impl Message {
 
         if self.is_fully_unsent() {
             return Some(Announcement::FullyUnsent);
+        }
+
+        if self.is_kept_audio_message() {
+            return Some(Announcement::AudioMessageKept);
         }
 
         None

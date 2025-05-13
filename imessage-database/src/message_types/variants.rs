@@ -129,6 +129,8 @@ pub enum Announcement<'a> {
     FullyUnsent,
     /// A group action
     GroupAction(GroupAction<'a>),
+    /// A user kept an audio message
+    AudioMessageKept,
     /// Types that may occur in the future
     Unknown(&'a i32),
 }
