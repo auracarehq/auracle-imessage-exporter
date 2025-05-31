@@ -9,7 +9,7 @@ mod type_tests {
         let expected = vec![Type::Array(904)];
         let result = Type::get_array_length(&items).unwrap();
 
-        assert_eq!(result, expected)
+        assert_eq!(result, expected);
     }
 
     #[test]
@@ -18,6 +18,6 @@ mod type_tests {
 
         let result = Type::get_array_length(&items);
 
-        assert!(result.is_none())
+        assert!(result.is_none());
     }
 }

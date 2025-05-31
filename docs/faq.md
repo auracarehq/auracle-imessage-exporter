@@ -6,7 +6,7 @@ Ensure your terminal emulator has [full disk access](https://kb.synology.com/en-
 
 ***
 
-## Are emojis,tapbacks (reactions), and other special message features preserved in the export?
+## Are emojis, tapbacks (reactions), and other special message features preserved in the export?
 
 Yes, all iMessage features are supported. See [here](features.md) for more detail.
 
@@ -20,7 +20,7 @@ Yes. See [here](features.md) for more detail on supported features.
 
 ## Does `imessage-exporter` export message conversations that are in iCloud or on a user's iPhone/iPad but not on the user's Mac?
 
-`imessage-exporter` only reads data present in the provided source, which can be either macOS's `chat.db` or an unencrypted iOS backup file. It cannot read data that is only stored in iCloud.
+`imessage-exporter` only reads data present in the provided source, which can be either macOS's `chat.db` or a local full iOS backup. It cannot read data that is only stored in iCloud.
 
 ***
 
@@ -90,7 +90,7 @@ In some instances, deleted messages are removed from the `chat_message_join` tab
 
 ## How fast is `imessage-exporter`?
 
-This is a complicated question that depends on CPU, database size, chosen export type, and chosen attachment handling style.
+This is a complicated question that depends on CPU, database size, chosen export type, encryption state, and chosen attachment handling style.
 
 On my M1 Max MacBook Pro, approximate performance is as follows:
 

@@ -84,6 +84,7 @@ impl Archivable {
     /// );
     /// println!("{:?}", not_nsstring.as_nsstring()); // None
     /// ```
+    #[must_use]
     pub fn as_nsstring(&self) -> Option<&str> {
         if let Archivable::Object(Class { name, .. }, value) = self {
             if name == "NSString" || name == "NSMutableString" {
@@ -121,6 +122,7 @@ impl Archivable {
     /// );
     /// println!("{:?}", not_nsnumber.as_nsnumber_int()); // None
     /// ```
+    #[must_use]
     pub fn as_nsnumber_int(&self) -> Option<&i64> {
         if let Archivable::Object(Class { name, .. }, value) = self {
             if name == "NSNumber" {
@@ -158,6 +160,7 @@ impl Archivable {
     /// );
     /// println!("{:?}", not_nsnumber.as_nsnumber_float()); // None
     /// ```
+    #[must_use]
     pub fn as_nsnumber_float(&self) -> Option<&f64> {
         if let Archivable::Object(Class { name, .. }, value) = self {
             if name == "NSNumber" {
@@ -261,7 +264,7 @@ impl Type {
                     .iter()
                     .take_while(|a| a.is_ascii_digit())
                     .fold(None, |acc, ch| {
-                        char::from_u32(*ch as u32)?
+                        char::from_u32(u32::from(*ch))?
                             .to_digit(10)
                             .map(|b| acc.unwrap_or(0) * 10 + b)
                     })?;

@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, fs::metadata, path::Path};
 
-use rusqlite::{blob::Blob, Connection, Error, OpenFlags, Result, Row, Statement};
+use rusqlite::{Connection, Error, OpenFlags, Result, Row, Statement, blob::Blob};
 
 use crate::{error::table::TableError, tables::messages::models::BubbleComponent};
 
@@ -70,7 +70,7 @@ pub trait AttributedBody {
     /// If the message has attachments, there will be one [`U+FFFC`](https://www.compart.com/en/unicode/U+FFFC) character
     /// for each attachment and one [`U+FFFD`](https://www.compart.com/en/unicode/U+FFFD) for app messages that we need
     /// to format.
-    /// 
+    ///
     /// ## Sample
     ///
     /// An iMessage that contains body text like:
@@ -107,14 +107,16 @@ pub trait AttributedBody {
 /// ```
 pub fn get_connection(path: &Path) -> Result<Connection, TableError> {
     if path.exists() && path.is_file() {
-        return match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
+        return match Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
             Ok(res) => Ok(res),
-            Err(why) => Err(
-                TableError::CannotConnect(
-                    format!("Unable to read from chat database: {why}\nEnsure full disk access is enabled for your terminal emulator in System Settings > Privacy & Security > Full Disk Access")
-                )),
-            };
-    };
+            Err(why) => Err(TableError::CannotConnect(format!(
+                "Unable to read from chat database: {why}\nEnsure full disk access is enabled for your terminal emulator in System Settings > Privacy & Security > Full Disk Access"
+            ))),
+        };
+    }
 
     // Path does not point to a file
     if path.exists() && !path.is_file() {
@@ -186,7 +188,7 @@ pub const YOU: &str = "You";
 pub const UNKNOWN: &str = "Unknown";
 /// Default location for the Messages database on macOS
 pub const DEFAULT_PATH_MACOS: &str = "Library/Messages/chat.db";
-/// Default location for the Messages database in an unencrypted iOS backup
+/// Default location for the Messages database in an iOS backup
 pub const DEFAULT_PATH_IOS: &str = "3d/3d0d7e5fb2ce288813306e4d4636395e047a3d28";
 /// Chat name reserved for messages that do not belong to a chat in the table
 pub const ORPHANED: &str = "orphaned";

@@ -71,13 +71,13 @@ pub(crate) fn copy_raw(from: &Path, to: &Path) {
                             copy_raw(&from_path, &to_path);
                         }
                         Err(why) => {
-                            eprintln!("Failed to read item in {:?}: {why}", from);
+                            eprintln!("Failed to read item in {from:?}: {why}");
                         }
                     }
                 }
             }
             Err(why) => {
-                eprintln!("Failed to read directory {:?}: {why}", from);
+                eprintln!("Failed to read directory {from:?}: {why}");
             }
         }
     } else {
@@ -93,6 +93,6 @@ pub(crate) fn copy_raw(from: &Path, to: &Path) {
 
         if let Err(why) = copy(from, to) {
             eprintln!("Unable to copy {from:?} to {to:?}: {why}");
-        };
+        }
     }
 }

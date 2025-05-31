@@ -4,7 +4,14 @@ The library and binary crates aim to provide the most comprehensive and accurate
 
 ## Targeted Versions
 
-This tool targets the current latest public release for macOS and iMessage. It may work with older databases, but all features may not be available.
+This tool targets the current latest public release for Messages.app. It may work with older databases, but all features may not be available.
+
+## Supported data sources
+
+- Local macOS messages
+- Encrypted or unencrypted local iOS backups
+  - Unencrypted backups are resolved normally
+  - Uses [crabapple](https://github.com/ReagentX/crabapple) to decrypt data from encrypted iOS backups
 
 ## Supported Message Features
 

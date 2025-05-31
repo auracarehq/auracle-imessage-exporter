@@ -25,6 +25,8 @@ use imessage_database::{
 
 use crate::app::{error::RuntimeError, runtime::Config};
 
+pub(crate) const ATTACHMENT_NO_FILENAME: &str = "Attachment missing name metadata!";
+
 /// Defines behavior for iterating over messages from the iMessage database and managing export files
 pub trait Exporter<'a> {
     /// Create a new exporter with references to the cached data

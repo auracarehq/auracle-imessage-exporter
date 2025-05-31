@@ -8,7 +8,7 @@
 
  ## Origin
 
- The format is derived from the data structure used by NeXTSTEP's `NXTypedStream` APIs.
+ The format is derived from the data structure used by `NeXTSTEP`'s `NXTypedStream` APIs.
 
  ## Features
 

@@ -65,6 +65,7 @@ impl<'a> BalloonProvider<'a> for AppMessage<'a> {
 
 impl AppMessage<'_> {
     /// Parse key/value pairs from the query string in the balloon's a URL
+    #[must_use]
     pub fn parse_query_string(&self) -> HashMap<&str, &str> {
         let mut map = HashMap::new();
 
@@ -161,7 +162,9 @@ mod tests {
         let balloon = AppMessage::from_map(&parsed).unwrap();
         let expected = AppMessage {
             image: None,
-            url: Some("https://www.opentable.com/book/view?rid=0000000&confnumber=00000&invitationId=1234567890-abcd-def-ghij-4u5t1sv3ryc00l"),
+            url: Some(
+                "https://www.opentable.com/book/view?rid=0000000&confnumber=00000&invitationId=1234567890-abcd-def-ghij-4u5t1sv3ryc00l",
+            ),
             title: Some("Rusty Grill - Boise"),
             subtitle: Some("Reservation Confirmed"),
             caption: Some("Table for 4 people\nSunday, October 17 at 7:45 PM"),
@@ -242,7 +245,9 @@ mod tests {
         let balloon = AppMessage::from_map(&parsed).unwrap();
         let expected = AppMessage {
             image: None,
-            url: Some("?receivedMessage=33c309ab520bc2c76e99c493157ed578&replyMessage=6a991da615f2e75d4aa0de334e529024"),
+            url: Some(
+                "?receivedMessage=33c309ab520bc2c76e99c493157ed578&replyMessage=6a991da615f2e75d4aa0de334e529024",
+            ),
             title: None,
             subtitle: None,
             caption: Some("Yes, connect me with Goldman Sachs."),

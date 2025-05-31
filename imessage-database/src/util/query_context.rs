@@ -130,6 +130,7 @@ impl QueryContext {
     /// context.set_start("2023-01-01");
     /// assert!(context.has_filters());
     /// ```
+    #[must_use]
     pub fn has_filters(&self) -> bool {
         self.start.is_some()
             || self.end.is_some()

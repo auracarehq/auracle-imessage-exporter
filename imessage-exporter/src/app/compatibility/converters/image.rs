@@ -21,10 +21,7 @@ pub(crate) fn image_copy_convert(
     converter: &ImageConverter,
     mime_type: MediaType,
 ) -> Option<MediaType<'static>> {
-    if matches!(
-        mime_type,
-        MediaType::Image("heic") | MediaType::Image("HEIC")
-    ) {
+    if matches!(mime_type, MediaType::Image("heic" | "HEIC")) {
         let output_type = ImageType::Jpeg;
 
         // Update extension for conversion
@@ -35,9 +32,8 @@ pub(crate) fn image_copy_convert(
             // If the conversion was successful, update the path
             *to = converted_path;
             return Some(MediaType::Image(output_type.to_str()));
-        } else {
-            eprintln!("Unable to convert {from:?}");
         }
+        eprintln!("Unable to convert {from:?}");
     }
 
     // Fallback

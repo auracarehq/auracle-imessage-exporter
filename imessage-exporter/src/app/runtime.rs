@@ -5,10 +5,11 @@
 use std::{
     cmp::min,
     collections::{BTreeSet, HashMap, HashSet},
-    fs::create_dir_all,
-    path::PathBuf,
+    fs::{create_dir_all, remove_file},
+    path::{Path, PathBuf},
 };
 
+use crabapple::Backup;
 use fdlimit::raise_fd_limit;
 use fs2::available_space;
 use rusqlite::Connection;
@@ -16,13 +17,19 @@ use rusqlite::Connection;
 use crate::{
     Exporter, HTML, TXT,
     app::{
-        compatibility::attachment_manager::AttachmentManagerMode, error::RuntimeError,
-        export_type::ExportType, options::Options, sanitizers::sanitize_filename,
+        compatibility::{
+            attachment_manager::AttachmentManagerMode,
+            backup::{decrypt_backup, get_decrypted_message_database},
+        },
+        error::RuntimeError,
+        export_type::ExportType,
+        options::{OPTION_CLEARTEXT_PASSWORD, Options},
+        sanitizers::sanitize_filename,
     },
+    exporters::exporter::ATTACHMENT_NO_FILENAME,
 };
 
 use imessage_database::{
-    error::table::TableError,
     tables::{
         attachment::Attachment,
         chat::Chat,
@@ -34,7 +41,7 @@ use imessage_database::{
             get_connection, get_db_size,
         },
     },
-    util::{dates::get_offset, size::format_file_size},
+    util::{dates::get_offset, platform::Platform, size::format_file_size},
 };
 
 const MAX_LENGTH: usize = 235;
@@ -58,7 +65,9 @@ pub struct Config {
     /// Global date offset used by the iMessage database:
     pub offset: i64,
     /// The connection we use to query the database
-    pub db: Connection,
+    pub db: Option<Connection>,
+    /// An optional encrypted iOS backup
+    pub backup: Option<Backup>,
 }
 
 impl Config {
@@ -114,7 +123,12 @@ impl Config {
                     &self.options.db_path,
                     self.options.attachment_root.as_deref(),
                 )
-                .unwrap_or_else(|| attachment.filename().to_string()),
+                .unwrap_or_else(|| {
+                    attachment
+                        .filename()
+                        .unwrap_or(ATTACHMENT_NO_FILENAME)
+                        .to_string()
+                }),
         }
     }
 
@@ -211,17 +225,31 @@ impl Config {
     /// let app = Config::new(options).unwrap();
     /// ```
     pub fn new(options: Options) -> Result<Config, RuntimeError> {
-        let conn = get_connection(&options.get_db_path()).map_err(RuntimeError::DatabaseError)?;
+        let backup = decrypt_backup(&options)?;
+        let conn = match &backup {
+            Some(b) => get_connection(&get_decrypted_message_database(b)?),
+            None => get_connection(&options.get_db_path()),
+        }?;
+
+        // Check if the backup is encrypted and a password was not provided
+        if matches!(options.platform, Platform::iOS)
+            && backup.is_none()
+            && conn.query_row("SELECT 1", [], |_| Ok(())).is_err()
+        {
+            return Err(RuntimeError::InvalidOptions(format!(
+                "The provided iOS backup is encrypted, but no password was provided. Please provide a password using the --{OPTION_CLEARTEXT_PASSWORD} option."
+            )));
+        }
+
         eprintln!("Building cache...");
         eprintln!("  [1/4] Caching chats...");
-        let chatrooms = Chat::cache(&conn).map_err(RuntimeError::DatabaseError)?;
+        let chatrooms = Chat::cache(&conn)?;
         eprintln!("  [2/4] Caching chatrooms...");
-        let chatroom_participants =
-            ChatToHandle::cache(&conn).map_err(RuntimeError::DatabaseError)?;
+        let chatroom_participants = ChatToHandle::cache(&conn)?;
         eprintln!("  [3/4] Caching participants...");
-        let participants = Handle::cache(&conn).map_err(RuntimeError::DatabaseError)?;
+        let participants = Handle::cache(&conn)?;
         eprintln!("  [4/4] Caching tapbacks...");
-        let tapbacks = Message::cache(&conn).map_err(RuntimeError::DatabaseError)?;
+        let tapbacks = Message::cache(&conn)?;
         eprintln!("Cache built!");
 
         Ok(Config {
@@ -233,13 +261,28 @@ impl Config {
             tapbacks,
             options,
             offset: get_offset(),
-            db: conn,
+            db: Some(conn),
+            backup,
         })
+    }
+
+    /// Get the current database connection, if it is alive
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database connection is closed.
+    pub(crate) fn db(&self) -> &Connection {
+        match self.db.as_ref() {
+            Some(db) => db,
+            None => {
+                panic!("Database connection is closed!");
+            }
+        }
     }
 
     /// Convert comma separated list of participant strings into table chat IDs using
     ///   1) filter `self.participant` keys based on the values (by comparing to user values)
-    ///   2) get the chat IDs keys from `self.chatroom_participants` for values that contain the selected handle_ids
+    ///   2) get the chat IDs keys from `self.chatroom_participants` for values that contain the selected `handle_ids`
     ///   3) send those chat and handle IDs to the query context so they are included in the message table filters
     pub(crate) fn resolve_filtered_handles(&mut self) {
         if let Some(conversation_filter) = &self.options.conversation_filter {
@@ -252,11 +295,11 @@ impl Config {
             self.participants
                 .iter()
                 .for_each(|(handle_id, handle_name)| {
-                    parsed_handle_filter.iter().for_each(|included_name| {
+                    for included_name in &parsed_handle_filter {
                         if handle_name.contains(included_name) {
                             included_handles.insert(*handle_id);
                         }
-                    });
+                    }
                 });
 
             // Second, scan the list of chatrooms for IDs that contain the selected participants
@@ -276,7 +319,7 @@ impl Config {
                 .query_context
                 .set_selected_chat_ids(included_chatrooms);
 
-            self.log_filtered_handles_and_chats()
+            self.log_filtered_handles_and_chats();
         }
     }
 
@@ -301,10 +344,10 @@ impl Config {
             eprintln!(
                 "Filtering for {} handle{} across {} chatrooms...",
                 unique_handle_ids.len(),
-                if unique_handle_ids.len() != 1 {
-                    "s"
-                } else {
+                if unique_handle_ids.len() == 1 {
                     ""
+                } else {
+                    "s"
                 },
                 unique_chat_ids.len()
             );
@@ -315,12 +358,12 @@ impl Config {
     fn ensure_free_space(&self) -> Result<(), RuntimeError> {
         // Export size is usually about 6% the size of the db; we divide by 10 to over-estimate about 10% of the total size
         // for some safe headroom
-        let total_db_size =
-            get_db_size(&self.options.db_path).map_err(RuntimeError::DatabaseError)?;
+        let total_db_size = get_db_size(Path::new(
+            self.db().path().ok_or(RuntimeError::FileNameError)?,
+        ))?;
         let mut estimated_export_size = total_db_size / 10;
 
-        let free_space_at_location =
-            available_space(&self.options.export_path).map_err(RuntimeError::DiskError)?;
+        let free_space_at_location = available_space(&self.options.export_path)?;
 
         // Validate that there is enough disk space free to write the export
         if let AttachmentManagerMode::Disabled = self.options.attachment_manager.mode {
@@ -332,16 +375,15 @@ impl Config {
             }
         } else {
             let total_attachment_size =
-                Attachment::get_total_attachment_bytes(&self.db, &self.options.query_context)
-                    .map_err(RuntimeError::DatabaseError)?;
+                Attachment::get_total_attachment_bytes(self.db(), &self.options.query_context)?;
             estimated_export_size += total_attachment_size;
-            if (estimated_export_size + total_attachment_size) >= free_space_at_location {
+            if estimated_export_size >= free_space_at_location {
                 return Err(RuntimeError::NotEnoughAvailableSpace(
                     estimated_export_size + total_attachment_size,
                     free_space_at_location,
                 ));
             }
-        };
+        }
 
         println!(
             "Estimated export size: {}",
@@ -352,30 +394,32 @@ impl Config {
     }
 
     /// Handles diagnostic tests for database
-    fn run_diagnostic(&self) -> Result<(), TableError> {
+    fn run_diagnostic(&self) -> Result<(), RuntimeError> {
         println!("\niMessage Database Diagnostics\n");
-        Handle::run_diagnostic(&self.db)?;
-        Message::run_diagnostic(&self.db)?;
-        Attachment::run_diagnostic(&self.db, &self.options.db_path, &self.options.platform)?;
-        ChatToHandle::run_diagnostic(&self.db)?;
+        Handle::run_diagnostic(self.db())?;
+        Message::run_diagnostic(self.db())?;
+        Attachment::run_diagnostic(self.db(), &self.options.db_path, &self.options.platform)?;
+        ChatToHandle::run_diagnostic(self.db())?;
 
         // Global Diagnostics
         println!("Global diagnostic data:");
 
-        let total_db_size = get_db_size(&self.options.db_path)?;
+        let total_db_size = get_db_size(Path::new(
+            self.db().path().ok_or(RuntimeError::FileNameError)?,
+        ))?;
         println!(
             "    Total database size: {}",
             format_file_size(total_db_size)
         );
 
         let unique_handles: HashSet<i32> =
-            HashSet::from_iter(self.real_participants.values().cloned());
+            HashSet::from_iter(self.real_participants.values().copied());
         let duplicated_handles = self.participants.len() - unique_handles.len();
         if duplicated_handles > 0 {
             println!("    Duplicated contacts: {duplicated_handles}");
         }
 
-        let unique_chats: HashSet<i32> = HashSet::from_iter(self.real_chatrooms.values().cloned());
+        let unique_chats: HashSet<i32> = HashSet::from_iter(self.real_chatrooms.values().copied());
         let duplicated_chats = self.chatrooms.len() - unique_chats.len();
         if duplicated_chats > 0 {
             println!("    Duplicated chats: {duplicated_chats}");
@@ -405,27 +449,26 @@ impl Config {
     /// ```
     pub fn start(&self) -> Result<(), RuntimeError> {
         if self.options.diagnostic {
-            self.run_diagnostic().map_err(RuntimeError::DatabaseError)?;
+            self.run_diagnostic()?;
         } else if let Some(export_type) = &self.options.export_type {
             // Ensure that if we want to filter on things, we have stuff to filter for
             if let Some(filters) = &self.options.conversation_filter {
                 if !self.options.query_context.has_filters() {
                     return Err(RuntimeError::InvalidOptions(format!(
-                        "Selected filter `{}` does not match any participants!",
-                        filters
+                        "Selected filter `{filters}` does not match any participants!"
                     )));
                 }
             }
 
             // Ensure the path we want to export to exists
-            create_dir_all(&self.options.export_path).map_err(RuntimeError::DiskError)?;
+            create_dir_all(&self.options.export_path)?;
 
             // Ensure the path we want to copy attachments to exists, if requested
             if !matches!(
                 self.options.attachment_manager.mode,
                 AttachmentManagerMode::Disabled
             ) {
-                create_dir_all(self.attachment_path()).map_err(RuntimeError::DiskError)?;
+                create_dir_all(self.attachment_path())?;
             }
 
             // Ensure there is enough free disk space to write the export
@@ -485,7 +528,8 @@ impl Config {
             tapbacks: HashMap::new(),
             options,
             offset: get_offset(),
-            db: connection,
+            db: Some(connection),
+            backup: None,
         }
     }
 
@@ -538,6 +582,27 @@ impl Config {
             hide_attachment: 0,
             emoji_description: None,
             copied_path: None,
+        }
+    }
+}
+
+impl Drop for Config {
+    fn drop(&mut self) {
+        if let Some(backup) = &self.backup {
+            // Remove the temporary `sms.db` file if it was created
+            if backup.manifest_db.is_temporary {
+                if let Some(conn) = self.db.take() {
+                    let path = conn.path().unwrap().to_string();
+                    conn.close().ok();
+
+                    // Remove the file, ignoring errors if any
+                    if let Err(e) = remove_file(&path) {
+                        eprintln!(
+                            "warning: failed to remove temporary messages database at {path}: {e}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -993,7 +1058,7 @@ mod directory_tests {
         // Create attachment
         let mut attachment = Config::fake_attachment();
         let mut full_path = PathBuf::from("/Users/ReagentX/exports/attachments");
-        full_path.push(attachment.filename());
+        full_path.push(attachment.filename().unwrap());
         attachment.copied_path = Some(full_path);
 
         let result = app.message_attachment_path(&attachment);

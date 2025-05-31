@@ -62,7 +62,8 @@ The [releases page](https://github.com/ReagentX/imessage-exporter/releases) prov
 -p, --db-path <path/to/source>
         Specify an optional custom path for the iMessage database location
         For macOS, specify a path to a `chat.db` file
-        For iOS, specify a path to the root of an unencrypted backup directory
+        For iOS, specify a path to the root of a device backup directory
+        If the iOS backup is encrypted, --cleartext-password must be passed
         If omitted, the default directory is ~/Library/Messages/chat.db
         
 -r, --attachment-root <path/to/attachments>
@@ -108,6 +109,10 @@ The [releases page](https://github.com/ReagentX/imessage-exporter/releases) prov
         All conversations with the specified participants are exported, including group conversations
         Example: `-t steve@apple.com,5558675309`
         
+-x, --cleartext-password <password>
+        Optional password for encrypted iOS backups
+        This is only used when the source is an encrypted iOS backup directory
+        
 -h, --help
         Print help
 -V, --version
@@ -128,7 +133,7 @@ Export as `txt` and copy attachments in their original formats from the default 
 imessage-exporter -f txt -o output -c clone
 ```
 
-Export as `txt` from the an unencrypted iPhone backup located at `~/iphone_backup_latest` to a new folder in the current working directory called `backup_export`:
+Export as `txt` from an iPhone backup located at `~/iphone_backup_latest` to a new folder in the current working directory called `backup_export`:
 
 ```zsh
 imessage-exporter -f txt -p ~/iphone_backup_latest -a iOS -o backup_export

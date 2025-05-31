@@ -32,7 +32,7 @@ const REFERENCE_TAG: u64 = 0x92;
 
 /// Contains logic and data used to deserialize data from a `typedstream`.
 ///
-/// `typedstream` is a binary serialization format developed by NeXT and later adopted by Apple.
+/// `typedstream` is a binary serialization format developed by `NeXT` and later adopted by Apple.
 /// It's designed to serialize and deserialize complex object graphs and data structures in C and Objective-C.
 ///
 /// A `typedstream` begins with a header that includes format version and architecture information,
@@ -68,6 +68,7 @@ impl<'a> TypedStreamReader<'a> {
     /// let bytes: Vec<u8> = vec![]; // Example stream
     /// let mut reader = TypedStreamReader::from(&bytes);
     /// ```
+    #[must_use]
     pub fn from(stream: &'a [u8]) -> Self {
         Self {
             stream,
@@ -90,7 +91,7 @@ impl<'a> TypedStreamReader<'a> {
                     <[u8; 2]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
-                Ok(value as i64)
+                Ok(i64::from(value))
             }
             I_32 => {
                 let size = 4;
@@ -99,7 +100,7 @@ impl<'a> TypedStreamReader<'a> {
                     <[u8; 4]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
-                Ok(value as i64)
+                Ok(i64::from(value))
             }
             _ => {
                 if self.get_current_byte()? > REFERENCE_TAG as u8 && self.get_next_byte()? != END {
@@ -108,7 +109,7 @@ impl<'a> TypedStreamReader<'a> {
                 }
                 let value = i8::from_le_bytes([self.get_current_byte()?]);
                 self.idx += 1;
-                Ok(value as i64)
+                Ok(i64::from(value))
             }
         }
     }
@@ -124,7 +125,7 @@ impl<'a> TypedStreamReader<'a> {
                     <[u8; 2]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
-                Ok(value as u64)
+                Ok(u64::from(value))
             }
             I_32 => {
                 let size = 4;
@@ -133,12 +134,12 @@ impl<'a> TypedStreamReader<'a> {
                     <[u8; 4]>::try_from(self.read_exact_bytes(size)?)
                         .map_err(TypedStreamError::SliceError)?,
                 );
-                Ok(value as u64)
+                Ok(u64::from(value))
             }
             _ => {
                 let value = u8::from_le_bytes([self.get_current_byte()?]);
                 self.idx += 1;
-                Ok(value as u64)
+                Ok(u64::from(value))
             }
         }
     }
@@ -248,7 +249,7 @@ impl<'a> TypedStreamReader<'a> {
     /// Read a reference pointer for a Type
     fn read_pointer(&mut self) -> Result<u32, TypedStreamError> {
         let pointer = self.get_current_byte()?;
-        let result = (pointer as u32)
+        let result = u32::from(pointer)
             .checked_sub(REFERENCE_TAG as u32)
             .ok_or(TypedStreamError::InvalidPointer(pointer));
         self.idx += 1;
@@ -305,8 +306,8 @@ impl<'a> TypedStreamReader<'a> {
                         return Ok(self.object_table.get(idx));
                     }
                     ClassResult::ClassHierarchy(classes) => {
-                        for class in classes.into_iter() {
-                            self.object_table.push(class)
+                        for class in classes {
+                            self.object_table.push(class);
                         }
                     }
                 }
@@ -423,7 +424,7 @@ impl<'a> TypedStreamReader<'a> {
                                     self.object_table.pop();
                                     return result;
                                 }
-                                out_v.extend(data)
+                                out_v.extend(data);
                             }
                             Archivable::Class(cls) => out_v.push(OutputData::Class(cls)),
                             Archivable::Data(data) => out_v.extend(data),
@@ -434,14 +435,14 @@ impl<'a> TypedStreamReader<'a> {
                 }
                 Type::SignedInt => out_v.push(OutputData::SignedInteger(self.read_signed_int()?)),
                 Type::UnsignedInt => {
-                    out_v.push(OutputData::UnsignedInteger(self.read_unsigned_int()?))
+                    out_v.push(OutputData::UnsignedInteger(self.read_unsigned_int()?));
                 }
                 Type::Float => out_v.push(OutputData::Float(self.read_float()?)),
                 Type::Double => out_v.push(OutputData::Double(self.read_double()?)),
                 Type::Unknown(byte) => out_v.push(OutputData::Byte(byte)),
                 Type::String(s) => out_v.push(OutputData::String(s)),
                 Type::Array(size) => out_v.push(OutputData::Array(self.read_array(size)?)),
-            };
+            }
         }
 
         // If we had reserved a place for an object, fill that spot
@@ -479,7 +480,7 @@ impl<'a> TypedStreamReader<'a> {
 
     /// In the original source there are several variants of the header, but we
     /// only need to validate that this is the header used by macOS/iOS, as iMessage
-    /// is probably not available on any NeXT platform
+    /// is probably not available on any `NeXT` platform
     pub(crate) fn validate_header(&mut self) -> Result<(), TypedStreamError> {
         // Encoding type
         let typedstream_version = self.read_unsigned_int()?;

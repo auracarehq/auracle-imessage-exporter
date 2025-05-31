@@ -9,7 +9,7 @@ mod exclude_recoverable_tests {
         let context = QueryContext::default();
 
         let statement = Message::generate_filter_statement(&context, false);
-        assert_eq!(statement, "")
+        assert_eq!(statement, "");
     }
 
     #[test]
@@ -18,7 +18,7 @@ mod exclude_recoverable_tests {
         context.set_start("2020-01-01").unwrap();
 
         let statement = Message::generate_filter_statement(&context, false);
-        assert_eq!(statement, "WHERE  m.date >= 599558400000000000")
+        assert_eq!(statement, "WHERE  m.date >= 599558400000000000");
     }
 
     #[test]
@@ -27,7 +27,7 @@ mod exclude_recoverable_tests {
         context.set_end("2020-01-01").unwrap();
 
         let statement = Message::generate_filter_statement(&context, false);
-        assert_eq!(statement, "WHERE  m.date <= 599558400000000000")
+        assert_eq!(statement, "WHERE  m.date <= 599558400000000000");
     }
 
     #[test]
@@ -40,7 +40,7 @@ mod exclude_recoverable_tests {
         assert_eq!(
             statement,
             "WHERE  m.date >= 599558400000000000 AND  m.date <= 602323200000000000"
-        )
+        );
     }
 
     #[test]
@@ -49,7 +49,7 @@ mod exclude_recoverable_tests {
         context.set_selected_chat_ids(BTreeSet::from([1, 2, 3]));
 
         let statement = Message::generate_filter_statement(&context, false);
-        assert_eq!(statement, "WHERE  c.chat_id IN (1, 2, 3)")
+        assert_eq!(statement, "WHERE  c.chat_id IN (1, 2, 3)");
     }
 
     #[test]
@@ -63,7 +63,7 @@ mod exclude_recoverable_tests {
         assert_eq!(
             statement,
             "WHERE  m.date >= 599558400000000000 AND  m.date <= 602323200000000000 AND  c.chat_id IN (1, 2, 3)"
-        )
+        );
     }
 
     #[test]
@@ -92,7 +92,7 @@ mod exclude_recoverable_tests {
         context.set_selected_chat_ids(BTreeSet::new());
 
         let statement = Message::generate_filter_statement(&context, false);
-        assert_eq!(statement, "")
+        assert_eq!(statement, "");
     }
 
     #[test]
@@ -118,7 +118,7 @@ mod include_recoverable_tests {
         let context = QueryContext::default();
 
         let statement = Message::generate_filter_statement(&context, true);
-        assert_eq!(statement, "")
+        assert_eq!(statement, "");
     }
 
     #[test]
@@ -127,7 +127,7 @@ mod include_recoverable_tests {
         context.set_start("2020-01-01").unwrap();
 
         let statement = Message::generate_filter_statement(&context, true);
-        assert_eq!(statement, "WHERE  m.date >= 599558400000000000")
+        assert_eq!(statement, "WHERE  m.date >= 599558400000000000");
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod include_recoverable_tests {
         context.set_end("2020-01-01").unwrap();
 
         let statement = Message::generate_filter_statement(&context, true);
-        assert_eq!(statement, "WHERE  m.date <= 599558400000000000")
+        assert_eq!(statement, "WHERE  m.date <= 599558400000000000");
     }
 
     #[test]
@@ -149,7 +149,7 @@ mod include_recoverable_tests {
         assert_eq!(
             statement,
             "WHERE  m.date >= 599558400000000000 AND  m.date <= 602323200000000000"
-        )
+        );
     }
 
     #[test]
@@ -161,7 +161,7 @@ mod include_recoverable_tests {
         assert_eq!(
             statement,
             "WHERE  (c.chat_id IN (1, 2, 3) OR d.chat_id IN (1, 2, 3))"
-        )
+        );
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod include_recoverable_tests {
         assert_eq!(
             statement,
             "WHERE  m.date >= 599558400000000000 AND  m.date <= 602323200000000000 AND  (c.chat_id IN (1, 2, 3) OR d.chat_id IN (1, 2, 3))"
-        )
+        );
     }
 
     #[test]
@@ -231,8 +231,8 @@ mod guid_query_tests {
         let mut message =
             Message::from_guid("0355C6E1-D0C8-4212-AA87-DD8AE4FD1203", &conn).unwrap();
         let _ = message.generate_text(&conn);
-        println!("{:#?}", message);
-        assert!(message.components.is_some())
+        println!("{message:#?}");
+        assert!(message.components.is_some());
     }
 
     #[test]

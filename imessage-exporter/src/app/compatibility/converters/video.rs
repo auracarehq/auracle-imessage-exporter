@@ -21,10 +21,7 @@ pub(crate) fn video_copy_convert(
     converter: &VideoConverter,
     mime_type: MediaType,
 ) -> Option<MediaType<'static>> {
-    if matches!(
-        mime_type,
-        MediaType::Video("mov") | MediaType::Video("MOV") | MediaType::Video("quicktime")
-    ) {
+    if matches!(mime_type, MediaType::Video("mov" | "MOV" | "quicktime")) {
         let output_type = VideoType::Mp4;
 
         // Update extension for conversion
@@ -34,9 +31,8 @@ pub(crate) fn video_copy_convert(
         if convert_mov(from, &converted_path, converter).is_some() {
             *to = converted_path;
             return Some(MediaType::Video(output_type.to_str()));
-        } else {
-            eprintln!("Unable to convert {from:?}");
         }
+        eprintln!("Unable to convert {from:?}");
     }
 
     // Fallback

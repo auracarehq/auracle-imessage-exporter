@@ -10,7 +10,7 @@ use crate::{
     error::table::TableError,
     tables::{
         messages::models::Service,
-        table::{Cacheable, Table, CHAT},
+        table::{CHAT, Cacheable, Table},
     },
 };
 
@@ -86,6 +86,7 @@ impl Cacheable for Chat {
 
 impl Chat {
     /// Generate a name for a chat, falling back to the default if a custom one is not set
+    #[must_use]
     pub fn name(&self) -> &str {
         match self.display_name() {
             Some(name) => name,
@@ -94,6 +95,7 @@ impl Chat {
     }
 
     /// Get the current display name for the chat, if it exists.
+    #[must_use]
     pub fn display_name(&self) -> Option<&str> {
         match &self.display_name {
             Some(name) => {
@@ -107,6 +109,7 @@ impl Chat {
     }
 
     /// Get the service used by the chat, i.e. iMessage, SMS, IRC, etc.
+    #[must_use]
     pub fn service(&self) -> Service {
         Service::from(self.service_name.as_deref())
     }

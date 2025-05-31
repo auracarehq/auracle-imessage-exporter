@@ -188,6 +188,15 @@ a[href^="#"] {
     text-align: right;
 }
 
+.timestamp a {
+    text-decoration: none;
+    color: inherit;
+}
+
+.timestamp a:hover {
+    text-decoration: underline;
+}
+
 span.timestamp,
 span.reply_context,
 span.expressive,

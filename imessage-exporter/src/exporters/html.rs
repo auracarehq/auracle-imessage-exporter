@@ -13,7 +13,9 @@ use crate::{
         compatibility::attachment_manager::AttachmentManagerMode, error::RuntimeError,
         progress::ExportProgress, runtime::Config, sanitizers::sanitize_html,
     },
-    exporters::exporter::{BalloonFormatter, Exporter, TextEffectFormatter, Writer},
+    exporters::exporter::{
+        ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, TextEffectFormatter, Writer,
+    },
 };
 
 use imessage_database::{
@@ -71,11 +73,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
         let mut orphaned = config.options.export_path.clone();
         orphaned.push(ORPHANED);
         orphaned.set_extension("html");
-        let file = File::options()
-            .append(true)
-            .create(true)
-            .open(&orphaned)
-            .map_err(|err| RuntimeError::CreateError(err, orphaned))?;
+        let file = File::options().append(true).create(true).open(&orphaned)?;
 
         Ok(HTML {
             config,
@@ -101,20 +99,18 @@ impl<'a> Exporter<'a> for HTML<'a> {
         // Set up progress bar
         let mut current_message = 0;
         let total_messages =
-            Message::get_count(&self.config.db, &self.config.options.query_context)
-                .map_err(RuntimeError::DatabaseError)?;
+            Message::get_count(self.config.db(), &self.config.options.query_context)?;
         self.pb.start(total_messages);
 
         let mut statement =
-            Message::stream_rows(&self.config.db, &self.config.options.query_context)
-                .map_err(RuntimeError::DatabaseError)?;
+            Message::stream_rows(self.config.db(), &self.config.options.query_context)?;
 
         let messages = statement
             .query_map([], |row| Ok(Message::from_row(row)))
             .map_err(|err| RuntimeError::DatabaseError(TableError::Messages(err)))?;
 
         for message in messages {
-            let mut msg = Message::extract(message).map_err(RuntimeError::DatabaseError)?;
+            let mut msg = Message::extract(message)?;
 
             // Early escape if we try and render the same message GUID twice
             // See https://github.com/ReagentX/imessage-exporter/issues/135 for rationale
@@ -125,7 +121,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
             current_message_row = msg.rowid;
 
             // Generate the text of the message
-            let _ = msg.generate_text(&self.config.db);
+            let _ = msg.generate_text(self.config.db());
 
             // Render the announcement in-line
             if msg.is_announcement() {
@@ -134,9 +130,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
             }
             // Message replies and tapbacks are rendered in context, so no need to render them separately
             else if !msg.is_tapback() {
-                let message = self
-                    .format_message(&msg, 0)
-                    .map_err(RuntimeError::DatabaseError)?;
+                let message = self.format_message(&msg, 0)?;
                 HTML::write_to_file(self.get_or_create_file(&msg)?, &message)?;
             }
             current_message += 1;
@@ -147,7 +141,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
         self.pb.finish();
 
         eprintln!("Writing HTML footers...");
-        for (_, buf) in self.files.iter_mut() {
+        for buf in self.files.values_mut() {
             HTML::write_to_file(buf, FOOTER)?;
         }
         HTML::write_to_file(&mut self.orphaned, FOOTER)?;
@@ -174,11 +168,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
                         // This can happen if multiple chats use the same group name
                         let file_exists = path.exists();
 
-                        let file = File::options()
-                            .append(true)
-                            .create(true)
-                            .open(&path)
-                            .map_err(|err| RuntimeError::CreateError(err, path))?;
+                        let file = File::options().append(true).create(true).open(&path)?;
 
                         let mut buf = BufWriter::new(file);
 
@@ -228,9 +218,14 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
 
         // Add message date
+        let (date, read_after) = self.get_time(message);
+        let linked_time = format!(
+            "<a title=\"Reveal in Messages app\" href=\"sms://open?message-guid={}\">{date}</a>",
+            message.guid
+        );
         self.add_line(
             &mut formatted_message,
-            &self.get_time(message),
+            &format!("{linked_time} {read_after}"),
             "<p><span class=\"timestamp\">",
             "</span>",
         );
@@ -241,7 +236,10 @@ impl<'a> Writer<'a> for HTML<'a> {
                 // If we are indented it means we are rendering in a thread
                 self.add_line(
                     &mut formatted_message,
-                    &format!("<a href=\"#r-{}\">⇲</a>", message.guid),
+                    &format!(
+                        "<a title=\"View in context\" href=\"#r-{}\">⇲</a>",
+                        message.guid
+                    ),
                     "<span class=\"reply_anchor\">",
                     "</span>",
                 );
@@ -249,7 +247,10 @@ impl<'a> Writer<'a> for HTML<'a> {
                 // If there is no ident we are rendering a top-level message
                 self.add_line(
                     &mut formatted_message,
-                    &format!("<a href=\"#{}\">⇱</a>", message.guid),
+                    &format!(
+                        "<a title=\"View in thread\" href=\"#{}\">⇱</a>",
+                        message.guid
+                    ),
                     "<span class=\"reply_anchor\">",
                     "</span>",
                 );
@@ -280,8 +281,8 @@ impl<'a> Writer<'a> for HTML<'a> {
 
         // Useful message metadata
         let message_parts = message.body();
-        let mut attachments = Attachment::from_message(&self.config.db, message)?;
-        let mut replies = message.get_replies(&self.config.db)?;
+        let mut attachments = Attachment::from_message(self.config.db(), message)?;
+        let mut replies = message.get_replies(self.config.db())?;
 
         // Index of where we are in the attachment Vector
         let mut attachment_index: usize = 0;
@@ -342,7 +343,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                                         "<div class=\"edited\">",
                                         "</div>",
                                     );
-                                };
+                                }
                             }
                         } else {
                             let mut formatted_text = self.format_attributes(text, text_attrs);
@@ -441,10 +442,10 @@ impl<'a> Writer<'a> for HTML<'a> {
                                 "<span class=\"unsent\">",
                                 "</span>",
                             );
-                        };
+                        }
                     }
                 }
-            };
+            }
 
             // Write the part div end
             self.add_line(&mut formatted_message, "</div>", "", "");
@@ -498,7 +499,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                 replies
                     .iter_mut()
                     .try_for_each(|reply| -> Result<(), TableError> {
-                        let _ = reply.generate_text(&self.config.db);
+                        let _ = reply.generate_text(self.config.db());
                         if !reply.is_tapback() {
                             // Set indent to 1 so we know this is a recursive call
                             self.add_line(
@@ -548,7 +549,7 @@ impl<'a> Writer<'a> for HTML<'a> {
 
         if will_encode {
             self.pb
-                .set_busy_style("Encoding video, estimates may become inaccurate...".to_string());
+                .set_busy_style("Encoding video, estimates paused...".to_string());
         }
 
         // Copy the file, if requested
@@ -556,7 +557,7 @@ impl<'a> Writer<'a> for HTML<'a> {
             .options
             .attachment_manager
             .handle_attachment(message, attachment, self.config)
-            .ok_or(attachment.filename())?;
+            .ok_or(attachment.filename().ok_or(ATTACHMENT_NO_FILENAME)?)?;
 
         if will_encode {
             self.pb.set_default_style();
@@ -590,13 +591,13 @@ impl<'a> Writer<'a> for HTML<'a> {
             MediaType::Text(_) => {
                 format!(
                     "<a href=\"{embed_path}\">Click to download {} ({})</a>",
-                    attachment.filename(),
+                    attachment.filename().ok_or(ATTACHMENT_NO_FILENAME)?,
                     attachment.file_size()
                 )
             }
             MediaType::Application(_) => format!(
                 "<a href=\"{embed_path}\">Click to download {} ({})</a>",
-                attachment.filename(),
+                attachment.filename().ok_or(ATTACHMENT_NO_FILENAME)?,
                 attachment.file_size()
             ),
             MediaType::Unknown => {
@@ -607,7 +608,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                 {
                     format!(
                         "<p>Folder: <i>{}</i> ({}) <a href=\"{embed_path}\">Click to open</a></p>",
-                        attachment.filename(),
+                        attachment.filename().ok_or(ATTACHMENT_NO_FILENAME)?,
                         attachment.file_size()
                     )
                 } else {
@@ -627,14 +628,14 @@ impl<'a> Writer<'a> for HTML<'a> {
         match self.format_attachment(sticker, message, &AttachmentMeta::default()) {
             Ok(mut sticker_embed) => {
                 // Determine the source of the sticker
-                if let Some(sticker_source) = sticker.get_sticker_source(&self.config.db) {
+                if let Some(sticker_source) = sticker.get_sticker_source(self.config.db()) {
                     match sticker_source {
                         StickerSource::Genmoji => {
                             // Add sticker prompt
                             if let Some(prompt) = &sticker.emoji_description {
                                 sticker_embed.push_str(&format!(
                                     "\n<div class=\"genmoji_prompt\">Genmoji prompt: {prompt}</div>"
-                                ))
+                                ));
                             }
                         }
                         StickerSource::Memoji => sticker_embed
@@ -648,17 +649,17 @@ impl<'a> Writer<'a> for HTML<'a> {
                             ) {
                                 sticker_embed.push_str(&format!(
                                     "\n<div class=\"sticker_effect\">Sent with {sticker_effect} effect</div>"
-                                ))
+                                ));
                             }
                         }
                         StickerSource::App(bundle_id) => {
                             // Add the application name used to generate/send the sticker
                             let app_name = sticker
-                                .get_sticker_source_application_name(&self.config.db)
+                                .get_sticker_source_application_name(self.config.db())
                                 .unwrap_or(bundle_id);
                             sticker_embed.push_str(&format!(
                                 "\n<div class=\"sticker_name\">App: {app_name}</div>"
-                            ))
+                            ));
                         }
                     }
                 }
@@ -680,7 +681,7 @@ impl<'a> Writer<'a> for HTML<'a> {
 
             // Handwritten messages use a different payload type, so check that first
             if message.is_handwriting() {
-                if let Some(payload) = message.raw_payload_data(&self.config.db) {
+                if let Some(payload) = message.raw_payload_data(self.config.db()) {
                     return match HandwrittenMessage::from_payload(&payload) {
                         Ok(bubble) => Ok(self.format_handwriting(message, &bubble, message)),
                         Err(why) => Err(PlistParseError::HandwritingError(why)),
@@ -689,7 +690,7 @@ impl<'a> Writer<'a> for HTML<'a> {
             }
 
             if message.is_digital_touch() {
-                if let Some(payload) = message.raw_payload_data(&self.config.db) {
+                if let Some(payload) = message.raw_payload_data(self.config.db()) {
                     return match digital_touch::from_payload(&payload) {
                         Some(bubble) => Ok(self.format_digital_touch(message, &bubble, message)),
                         None => Err(PlistParseError::DigitalTouchError),
@@ -697,7 +698,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                 }
             }
 
-            if let Some(payload) = message.payload_data(&self.config.db) {
+            if let Some(payload) = message.payload_data(self.config.db()) {
                 let parsed = parse_ns_keyed_archiver(&payload)?;
 
                 let res = if message.is_url() {
@@ -768,7 +769,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                 }
                 match tapback {
                     Tapback::Sticker => {
-                        let mut paths = Attachment::from_message(&self.config.db, msg)?;
+                        let mut paths = Attachment::from_message(self.config.db(), msg)?;
                         let who = self.config.who(
                             msg.handle_id,
                             msg.is_from_me(),
@@ -889,11 +890,11 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
     }
 
-    fn format_shareplay(&self) -> &str {
+    fn format_shareplay(&self) -> &'static str {
         "<hr>SharePlay Message Ended"
     }
 
-    fn format_shared_location(&self, msg: &'a Message) -> &str {
+    fn format_shared_location(&self, msg: &'a Message) -> &'static str {
         // Handle Shared Location
         if msg.started_sharing_location() {
             return "<hr>Started sharing location!";
@@ -966,13 +967,13 @@ impl<'a> Writer<'a> for HTML<'a> {
                         Some(diff) => {
                             out_s.push_str(&format!(
                                 "<span class=\"unsent\">{who} unsent this message part {diff} after sending!</span>"
-                            ))
-                        },
+                            ));
+                        }
                         None => {
                             out_s.push_str(&format!(
                                 "<span class=\"unsent\">{who} unsent this message part!</span>"
-                            ))
-                        },
+                            ));
+                        }
                     }
                 }
                 EditStatus::Original => {
@@ -986,13 +987,13 @@ impl<'a> Writer<'a> for HTML<'a> {
 
     fn format_attributes(&'a self, text: &'a str, attributes: &'a [TextAttributes]) -> String {
         let mut formatted_text = String::with_capacity(text.len());
-        attributes.iter().for_each(|effect| {
+        for effect in attributes {
             if let Some(message_content) = text.get(effect.start..effect.end) {
                 // We cannot sanitize the html beforehand because it may change the length of the text
                 formatted_text
                     .push_str(&self.format_effect(&sanitize_html(message_content), &effect.effect));
             }
-        });
+        }
         formatted_text
     }
 
@@ -1348,8 +1349,7 @@ impl<'a> BalloonFormatter<&'a Message> for HTML<'a> {
 
     fn format_digital_touch(&self, _: &Message, balloon: &DigitalTouch, _: &'a Message) -> String {
         format!(
-            "<div class=\"app_header\"><div class=\"name\">Digital Touch Message</div></div>\n<div class=\"app_footer\"><div class=\"caption\">{:?}</div></div>",
-            balloon
+            "<div class=\"app_header\"><div class=\"name\">Digital Touch Message</div></div>\n<div class=\"app_footer\"><div class=\"caption\">{balloon:?}</div></div>"
         )
     }
 
@@ -1552,8 +1552,9 @@ impl<'a> TextEffectFormatter<'a> for HTML<'a> {
 }
 
 impl HTML<'_> {
-    fn get_time(&self, message: &Message) -> String {
-        let mut date = format(&message.date(&self.config.offset));
+    fn get_time(&self, message: &Message) -> (String, String) {
+        let date = format(&message.date(&self.config.offset));
+        let mut read_at = String::new();
         let read_after = message.time_until_read(&self.config.offset);
         if let Some(time) = read_after {
             if !time.is_empty() {
@@ -1562,10 +1563,10 @@ impl HTML<'_> {
                 } else {
                     self.config.options.custom_name.as_deref().unwrap_or("you")
                 };
-                date.push_str(&format!(" (Read by {who} after {time})"));
+                read_at = format!("(Read by {who} after {time})");
             }
         }
-        date
+        (date, read_at)
     }
 
     fn add_line(&self, string: &mut String, part: &str, pre: &str, post: &str) {
@@ -1704,7 +1705,9 @@ mod tests {
     use std::{env::current_dir, path::PathBuf};
 
     use crate::{
-        Config, Exporter, HTML, Options, app::export_type::ExportType, exporters::exporter::Writer,
+        Config, Exporter, HTML, Options,
+        app::{compatibility::attachment_manager::AttachmentManagerMode, export_type::ExportType},
+        exporters::exporter::Writer,
     };
     use imessage_database::{
         tables::{messages::models::AttachmentMeta, table::ME},
@@ -1738,7 +1741,10 @@ mod tests {
 
         assert_eq!(
             exporter.get_time(&message),
-            "May 17, 2022  5:29:42 PM (Read by you after 1 hour, 49 seconds)"
+            (
+                "May 17, 2022  5:29:42 PM".to_string(),
+                "(Read by you after 1 hour, 49 seconds)".to_string()
+            )
         );
     }
 
@@ -1757,7 +1763,10 @@ mod tests {
         message.date_delivered = 674530231992568192;
         // Wed May 18 2022 02:36:24 GMT+0000
         message.date_read = 674526582885055488;
-        assert_eq!(exporter.get_time(&message), "May 17, 2022  6:30:31 PM");
+        assert_eq!(
+            exporter.get_time(&message),
+            ("May 17, 2022  6:30:31 PM".to_string(), String::new())
+        );
     }
 
     #[test]
@@ -1817,7 +1826,7 @@ mod tests {
         message.chat_id = Some(0);
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1837,7 +1846,7 @@ mod tests {
         message.chat_id = Some(0);
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">&lt;table&gt;&lt;/table&gt;</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">&lt;table&gt;&lt;/table&gt;</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1857,7 +1866,7 @@ mod tests {
         message.deleted_from = Some(0);
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<span class=\"deleted\">This message was deleted from the conversation!</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<span class=\"deleted\">This message was deleted from the conversation!</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1878,7 +1887,7 @@ mod tests {
         message.is_from_me = true;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM (Read by them after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> (Read by them after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1900,7 +1909,7 @@ mod tests {
         message.handle_id = Some(999999);
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1926,7 +1935,7 @@ mod tests {
         message.date_read = 674530231992568192;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM (Read by you after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> (Read by you after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1953,7 +1962,7 @@ mod tests {
         message.date_read = 674530231992568192;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM (Read by Name after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> (Read by Name after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -1973,7 +1982,7 @@ mod tests {
         message.item_type = 6;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<span class=\"shareplay\"><hr>SharePlay Message Ended</span>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<span class=\"shareplay\"><hr>SharePlay Message Ended</span>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -2319,7 +2328,7 @@ mod tests {
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">Dec 31, 2000  4:00:00 PM</span>\n<span class=\"sender\">Me</span></p>\n<span class=\"shared_location\"><hr>Started sharing location!</span>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">Dec 31, 2000  4:00:00 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<span class=\"shared_location\"><hr>Started sharing location!</span>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -2339,7 +2348,7 @@ mod tests {
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">Dec 31, 2000  4:00:00 PM</span>\n<span class=\"sender\">Me</span></p>\n<span class=\"shared_location\"><hr>Stopped sharing location!</span>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">Dec 31, 2000  4:00:00 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<span class=\"shared_location\"><hr>Stopped sharing location!</span>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -2360,7 +2369,7 @@ mod tests {
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\">Dec 31, 2000  4:00:00 PM</span>\n<span class=\"sender\">Unknown</span></p>\n<span class=\"shared_location\"><hr>Started sharing location!</span>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">Dec 31, 2000  4:00:00 PM</a> </span>\n<span class=\"sender\">Unknown</span></p>\n<span class=\"shared_location\"><hr>Started sharing location!</span>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -2381,7 +2390,7 @@ mod tests {
         message.item_type = 4;
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\">Dec 31, 2000  4:00:00 PM</span>\n<span class=\"sender\">Unknown</span></p>\n<span class=\"shared_location\"><hr>Stopped sharing location!</span>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">Dec 31, 2000  4:00:00 PM</a> </span>\n<span class=\"sender\">Unknown</span></p>\n<span class=\"shared_location\"><hr>Stopped sharing location!</span>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -2405,7 +2414,7 @@ mod tests {
     }
 
     #[test]
-    fn can_format_html_attachment_macos_invalid() {
+    fn can_format_html_attachment_macos_invalid_disabled() {
         // Create exporter
         let options = Options::fake_options(ExportType::Html);
         let config = Config::fake_app(options);
@@ -2415,11 +2424,33 @@ mod tests {
 
         let mut attachment = Config::fake_attachment();
         attachment.filename = None;
+        attachment.transfer_name = None;
 
         let actual =
             exporter.format_attachment(&mut attachment, &message, &AttachmentMeta::default());
 
-        assert_eq!(actual, Err("d.jpg"));
+        assert_eq!(actual, Err("Attachment missing name metadata!"));
+    }
+
+    #[test]
+    fn can_format_html_attachment_macos_invalid_clone() {
+        // Create exporter
+        let mut options = Options::fake_options(ExportType::Html);
+        options.attachment_manager.mode = AttachmentManagerMode::Clone;
+
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let message = Config::fake_message();
+
+        let mut attachment = Config::fake_attachment();
+        attachment.filename = None;
+        attachment.transfer_name = None;
+
+        let actual =
+            exporter.format_attachment(&mut attachment, &message, &AttachmentMeta::default());
+
+        assert_eq!(actual, Err("Attachment missing name metadata!"));
     }
 
     #[test]
@@ -2442,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn can_format_html_attachment_ios_invalid() {
+    fn can_format_html_attachment_ios_invalid_disabled() {
         // Create exporter
         let options = Options::fake_options(ExportType::Html);
         let config = Config::fake_app(options);
@@ -2452,11 +2483,33 @@ mod tests {
 
         let mut attachment = Config::fake_attachment();
         attachment.filename = None;
+        attachment.transfer_name = None;
 
         let actual =
             exporter.format_attachment(&mut attachment, &message, &AttachmentMeta::default());
 
-        assert_eq!(actual, Err("d.jpg"));
+        assert_eq!(actual, Err("Attachment missing name metadata!"));
+    }
+
+    #[test]
+    fn can_format_html_attachment_ios_invalid_clone() {
+        // Create exporter
+        let mut options = Options::fake_options(ExportType::Html);
+        options.attachment_manager.mode = AttachmentManagerMode::Clone;
+
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let message = Config::fake_message();
+
+        let mut attachment = Config::fake_attachment();
+        attachment.filename = None;
+        attachment.transfer_name = None;
+
+        let actual =
+            exporter.format_attachment(&mut attachment, &message, &AttachmentMeta::default());
+
+        assert_eq!(actual, Err("Attachment missing name metadata!"));
     }
 
     #[test]
@@ -3205,7 +3258,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Test <span title=\"+15558675309\"><b>Dad</b></span> </span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Test <span title=\"+15558675309\"><b>Dad</b></span> </span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3237,7 +3290,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>000123</u> is your security code. Don&apos;t share your code.</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>000123</u> is your security code. Don&apos;t share your code.</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3269,7 +3322,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><a href=\"https://twitter.com/xxxxxxxxx/status/0000223300009216128\">https://twitter.com/xxxxxxxxx/status/0000223300009216128</a></span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><a href=\"https://twitter.com/xxxxxxxxx/status/0000223300009216128\">https://twitter.com/xxxxxxxxx/status/0000223300009216128</a></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3301,7 +3354,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hi. Right now or <u>tomorrow</u>?</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hi. Right now or <u>tomorrow</u>?</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3333,7 +3386,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><span class=\"animationBig\">Big</span> <span class=\"animationSmall\">small </span><span class=\"animationShake\">shake</span> <span class=\"animationNod\">nod</span> <span class=\"animationExplode\">explode </span><span class=\"animationRipple\">ripple</span> <span class=\"animationBloom\">bloom</span> <span class=\"animationJitter\">jitter</span></span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><span class=\"animationBig\">Big</span> <span class=\"animationSmall\">small </span><span class=\"animationShake\">shake</span> <span class=\"animationNod\">nod</span> <span class=\"animationExplode\">explode </span><span class=\"animationRipple\">ripple</span> <span class=\"animationBloom\">bloom</span> <span class=\"animationJitter\">jitter</span></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3365,7 +3418,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><b>Bold</b> <u>underline</u> <i>italic</i> <s>strikethrough</s> all <i><u><s><b>four</b></s></u></i></span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><b>Bold</b> <u>underline</u> <i>italic</i> <s>strikethrough</s> all <i><u><s><b>four</b></s></u></i></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3397,7 +3450,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><i><u><s><b>Everything</b></s></u></i></span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><i><u><s><b>Everything</b></s></u></i></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3429,7 +3482,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>Underline</u> normal <span class=\"animationJitter\">jitter</span> normal</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>Underline</u> normal <span class=\"animationJitter\">jitter</span> normal</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3584,7 +3637,7 @@ mod edited_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<div class=\"edited\"><table><tbody><tr><td><span class=\"timestamp\"></span></td><td>Test</td></tr></tbody><tfoot><tr><td><span class=\"timestamp\">Edited 10 seconds later</span></td><td><s>Test</s></td></tr></tfoot></table></div>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<div class=\"edited\"><table><tbody><tr><td><span class=\"timestamp\"></span></td><td>Test</td></tr></tbody><tfoot><tr><td><span class=\"timestamp\">Edited 10 seconds later</span></td><td><s>Test</s></td></tr></tfoot></table></div>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3639,7 +3692,7 @@ mod edited_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">From arbitrary byte stream:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"attachment_error\">Attachment does not exist!</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">To native Rust data structures:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"unsent\"><span class=\"unsent\">You unsent this message part 1 hour, 49 seconds after sending!</span></span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">From arbitrary byte stream:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"attachment_error\">Attachment does not exist!</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">To native Rust data structures:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"unsent\"><span class=\"unsent\">You unsent this message part 1 hour, 49 seconds after sending!</span></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3673,7 +3726,7 @@ mod edited_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">From arbitrary byte stream:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"attachment_error\">Attachment does not exist!</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">To native Rust data structures:\r</span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">From arbitrary byte stream:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"attachment_error\">Attachment does not exist!</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">To native Rust data structures:\r</span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }

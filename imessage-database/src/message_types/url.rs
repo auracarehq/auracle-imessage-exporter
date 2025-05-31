@@ -62,7 +62,9 @@ impl<'a> BalloonProvider<'a> for URLMessage<'a> {
 
 impl<'a> URLMessage<'a> {
     /// Gets the subtype of the URL message based on the payload
-    pub fn get_url_message_override(payload: &'a Value) -> Result<URLOverride<'a>, PlistParseError> {
+    pub fn get_url_message_override(
+        payload: &'a Value,
+    ) -> Result<URLOverride<'a>, PlistParseError> {
         if let Ok(balloon) = CollaborationMessage::from_map(payload) {
             return Ok(URLOverride::Collaboration(balloon));
         }
@@ -92,10 +94,10 @@ impl<'a> URLMessage<'a> {
 
         if let Some(meta) = root_dict.get("richLinkMetadata") {
             return Ok(meta);
-        };
+        }
         if let Some(meta) = root_dict.get("metadata") {
             return Ok(meta);
-        };
+        }
         Err(PlistParseError::NoPayload)
     }
 
@@ -127,6 +129,7 @@ impl<'a> URLMessage<'a> {
     }
 
     /// Get the redirected URL from a URL message, falling back to the original URL, if it exists
+    #[must_use]
     pub fn get_url(&self) -> Option<&str> {
         self.url.or(self.original_url)
     }

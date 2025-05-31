@@ -87,7 +87,7 @@ pub(crate) fn parse_body_typedstream<'a>(
                 if idx >= out_v.len() {
                     out_v.push(BubbleComponent::Retracted);
                 } else {
-                    out_v.insert(idx, BubbleComponent::Retracted)
+                    out_v.insert(idx, BubbleComponent::Retracted);
                 }
             }
         }
@@ -113,7 +113,7 @@ fn get_char_idx(text: &str, idx: usize, char_indices: &[usize]) -> usize {
     char_indices.get(idx).map_or(text.len(), |i| *i)
 }
 
-/// Get the number of key/value object pairs in a NSDictionary
+/// Get the number of key/value object pairs in a `NSDictionary`
 fn get_attribute_dict_length(component: Option<&Archivable>) -> usize {
     if let Some(Archivable::Object(class, data)) = component {
         if class.name == "NSDictionary" {
@@ -138,7 +138,7 @@ fn get_n_dict_objects(components: &[Archivable], idx: usize, num_objects: usize)
         }
         final_idx = idx;
     }
-    components.get(idx..final_idx + 1).unwrap_or(&[])
+    components.get(idx..=final_idx).unwrap_or(&[])
 }
 
 /// Determine the type of bubble the current range represents
@@ -223,7 +223,7 @@ fn get_bubble_type<'a>(
 /// Extract text styles from a range of key-value pairs
 fn resolve_styles(components: &[Archivable]) -> Vec<Style> {
     let mut styles = vec![];
-    for key in components.iter() {
+    for key in components {
         if let Some(key_name) = key.as_nsstring() {
             match key_name {
                 "__kIMTextBoldAttributeName" => styles.push(Style::Bold),
@@ -259,11 +259,11 @@ pub(crate) fn parse_body_legacy(text: &Option<String>) -> Vec<BubbleComponent> {
                     end = idx;
                     match char {
                         ATTACHMENT_CHAR => {
-                            out_v.push(BubbleComponent::Attachment(AttachmentMeta::default()))
+                            out_v.push(BubbleComponent::Attachment(AttachmentMeta::default()));
                         }
                         APP_CHAR => out_v.push(BubbleComponent::App),
                         _ => {}
-                    };
+                    }
                 } else {
                     if start > end {
                         start = idx;
@@ -861,7 +861,7 @@ mod typedstream_tests {
     #[test]
     fn can_get_message_body_custom_tapback() {
         let mut m = Message::blank();
-        m.text = Some("".to_string());
+        m.text = Some(String::new());
 
         let typedstream_path = current_dir()
             .unwrap()

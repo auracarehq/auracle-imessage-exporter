@@ -105,7 +105,7 @@ fn follow_uid<'a>(
                 if let Some(idx) = relative.as_uid() {
                     if let Some(p) = &parent {
                         dictionary.insert(
-                            p.to_string(),
+                            (*p).to_string(),
                             follow_uid(objects, idx.get() as usize, Some(p), None)?,
                         );
                     }
@@ -241,6 +241,7 @@ fn extract_string_idx(body: &[Value], idx: usize) -> Result<&str, PlistParseErro
 }
 
 /// Extract a string from a key-value pair that looks like `{key: String("value")}`
+#[must_use]
 pub fn get_string_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<&'a str> {
     payload
         .as_dictionary()?
@@ -250,16 +251,19 @@ pub fn get_string_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<&'a 
 }
 
 /// Extract an inner dict from a key-value pair that looks like `{key: {key2: val}}`
+#[must_use]
 pub fn get_value_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<&'a Value> {
     payload.as_dictionary()?.get(key)
 }
 
 /// Extract a bool from a key-value pair that looks like `{key: true}`
+#[must_use]
 pub fn get_bool_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<bool> {
     payload.as_dictionary()?.get(key)?.as_boolean()
 }
 
 /// Extract a string from a key-value pair that looks like `{key: {key: String("value")}}`
+#[must_use]
 pub fn get_string_from_nested_dict<'a>(payload: &'a Value, key: &'a str) -> Option<&'a str> {
     payload
         .as_dictionary()?
@@ -271,6 +275,7 @@ pub fn get_string_from_nested_dict<'a>(payload: &'a Value, key: &'a str) -> Opti
 }
 
 /// Extract a float from a key-value pair that looks like `{key: {key: 1.2}}`
+#[must_use]
 pub fn get_float_from_nested_dict<'a>(payload: &'a Value, key: &'a str) -> Option<f64> {
     payload
         .as_dictionary()?
