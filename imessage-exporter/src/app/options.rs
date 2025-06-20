@@ -438,7 +438,7 @@ impl Options {
                 .unwrap()
                 .join("imessage-database/test_data/db/test.db"),
             attachment_root: None,
-            attachment_manager: AttachmentManager::from(AttachmentManagerMode::Disabled),
+            attachment_manager: AttachmentManager::default(),
             diagnostic: false,
             export_type: Some(export_type),
             export_path: PathBuf::from("/tmp"),

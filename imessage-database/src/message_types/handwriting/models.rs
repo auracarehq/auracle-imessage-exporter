@@ -18,10 +18,13 @@ use protobuf::Message;
 /// `com.apple.Handwriting.HandwritingProvider`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct HandwrittenMessage {
+    /// Unique identifier for the handwritten message
     pub id: String,
     /// Timestamp for when the handwritten message was created, stored as a unix timestamp with an epoch of `2001-01-01 00:00:00` in the local time zone
     pub created_at: i64,
+    /// Height of the handwritten message in pixels
     pub height: u16,
+    /// Width of the handwritten message in pixels
     pub width: u16,
     /// Collection of strokes that make up the handwritten image
     pub strokes: Vec<Vec<Point>>,
@@ -30,8 +33,11 @@ pub struct HandwrittenMessage {
 /// Represents a point along a handwritten line.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Point {
+    /// X-coordinate of the point
     pub x: u16,
+    /// Y-coordinate of the point
     pub y: u16,
+    /// Width of the stroke at this point
     pub width: u16,
 }
 

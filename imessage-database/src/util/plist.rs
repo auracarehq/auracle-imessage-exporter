@@ -250,6 +250,12 @@ pub fn get_string_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<&'a 
         .filter(|s| !s.is_empty())
 }
 
+/// Extract an owned string from a key-value pair that looks like `{key: String("value")}`
+#[must_use]
+pub fn get_owned_string_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<String> {
+    get_string_from_dict(payload, key).map(String::from)
+}
+
 /// Extract an inner dict from a key-value pair that looks like `{key: {key2: val}}`
 #[must_use]
 pub fn get_value_from_dict<'a>(payload: &'a Value, key: &'a str) -> Option<&'a Value> {

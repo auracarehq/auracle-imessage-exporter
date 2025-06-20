@@ -96,10 +96,10 @@ On my M1 Max MacBook Pro, approximate performance is as follows:
 
 | `--copy-method` | Messages exported per second |
 |---|---|
-| `disabled` | 58,000 |
-| `clone` | 29,000 |
-| `basic` | < 350 |
-| `full` | < 20 |
+| `disabled` | 65,000 |
+| `clone` | 33,000 |
+| `basic` | ≈ 350 |
+| `full` | ≈ 250 |
 
 For more information on `--copy-method`, see [here](../imessage-exporter/README.md#how-to-use) and [here](./features.md#supported-message-features).
 

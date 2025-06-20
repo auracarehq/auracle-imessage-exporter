@@ -3816,4 +3816,156 @@ mod parser_tests {
             assert_eq!(result[idx], expected[idx]);
         }
     }
+
+    #[test]
+    fn test_parse_styled_plain_link() {
+        let typedstream_path = current_dir()
+            .unwrap()
+            .as_path()
+            .join("test_data/typedstream/StyledLink");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        let result = parser.parse().unwrap();
+
+        println!("\n\nGot data!");
+        result
+            .iter()
+            .enumerate()
+            .for_each(|(idx, item)| println!("\t{idx}: {item:?}"));
+
+        let expected_1 = vec![
+            Archivable::Object(
+                Class {
+                    name: "NSMutableString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "https://github.com/ReagentX/imessage-exporter/discussions/553".to_string(),
+                )],
+            ),
+            Archivable::Data(vec![
+                OutputData::SignedInteger(1),
+                OutputData::UnsignedInteger(61),
+            ]),
+            Archivable::Object(
+                Class {
+                    name: "NSDictionary".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(6)],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "__kIMBaseWritingDirectionAttributeName".to_string(),
+                )],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSNumber".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(-1)],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "__kIMLinkIsRichLinkAttributeName".to_string(),
+                )],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSNumber".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(0)],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "__kIMDataDetectedAttributeName".to_string(),
+                )],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSData".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(591)],
+            ),
+        ];
+
+        let expected_2 = vec![
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "__kIMMessagePartAttributeName".to_string(),
+                )],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSNumber".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(0)],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "__kIMTextEffectAttributeName".to_string(),
+                )],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSNumber".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(5)],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String("__kIMLinkAttributeName".to_string())],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSURL".to_string(),
+                    version: 0,
+                },
+                vec![OutputData::SignedInteger(0)],
+            ),
+            Archivable::Object(
+                Class {
+                    name: "NSString".to_string(),
+                    version: 1,
+                },
+                vec![OutputData::String(
+                    "https://github.com/ReagentX/imessage-exporter/discussions/553".to_string(),
+                )],
+            ),
+        ];
+
+        assert_eq!(result[..9], expected_1);
+        assert_eq!(result[10..], expected_2);
+    }
 }

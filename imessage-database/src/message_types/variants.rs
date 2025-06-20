@@ -162,7 +162,7 @@ pub enum Variant<'a> {
     Tapback(usize, TapbackAction, Tapback<'a>),
     /// An [iMessage app](https://support.apple.com/en-us/HT206906) generated message
     App(CustomBalloon<'a>),
-    /// A SharePlay message
+    /// A `SharePlay` message
     SharePlay,
     /// Container for new or unknown messages
     Unknown(i32),

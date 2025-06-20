@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     message_types::{
         edited::{EditStatus, EditedMessage},
@@ -16,7 +18,7 @@ const REPLACEMENT_CHARS: [char; 2] = [ATTACHMENT_CHAR, APP_CHAR];
 
 pub enum BubbleResult<'a> {
     New(BubbleComponent<'a>),
-    Continuation(TextAttributes<'a>),
+    Continuation(Vec<TextAttributes<'a>>),
 }
 
 /// Logic to use deserialized typedstream data to parse the message body
@@ -28,55 +30,69 @@ pub(crate) fn parse_body_typedstream<'a>(
     // Create the output data
     let mut out_v = vec![];
 
+    // Format ranges are only stored once and then referenced by order of appearance (starting at 1),
+    // so we need cache them to properly apply styles and attributes.
+    // The key is the range ID, and the value is a slice of `Archivable` that
+    // contains the attributes for that range.
+    let mut format_range_cache: HashMap<i64, &[Archivable]> = HashMap::new();
+
     // Start to iterate over the ranges
     if let Some(components) = components {
         // The first item is the text itself, so skip over it when iterating
         let mut idx = 1;
+        let mut current_range_id;
         let mut current_start;
         let mut current_end = 0;
 
         // We want to index into the message text, so we need a table to align
         // Apple's indexes with the actual chars, not the bytes
-        let char_index_table: Vec<usize> = text.as_ref()?.char_indices().map(|(a, _)| a).collect();
+        let utf16_to_byte: Vec<usize> = build_utf16_to_byte_map(text.as_ref()?);
 
         while idx < components.len() {
-            // The first part of the range sometimes indicates the part number, but not always
-            if let Some((_, length)) = get_range(components.get(idx)?) {
+            // The first part of the range represents the index in the format cache
+            // the second part is the length of the range in UTF-16 code units
+            if let Some((range_id, length)) = get_range(components.get(idx)?) {
                 current_start = current_end;
                 current_end += *length as usize;
+                current_range_id = *range_id;
             } else {
                 idx += 1;
                 continue;
             }
 
-            // The range is followed by a dictionary of attributes that map to that range
-            idx += 1;
-            let num_attrs = get_attribute_dict_length(components.get(idx));
-
-            // The next set of values alternate between key and value pairs for the dictionary, if there are any
-            if num_attrs > 0 {
+            // If the range is already cached, use it
+            let slice = if let Some(components) = format_range_cache.get(&current_range_id) {
+                // Advance the index by 1 to skip to the next range
                 idx += 1;
-            }
+                components
+            } else {
+                // The range is followed by a dictionary of attributes that map to that range
+                idx += 1;
+                let num_attrs = get_attribute_dict_length(components.get(idx));
 
-            // If there are no attributes, the default bubble will be applied
-            // Otherwise, determine the bubble based on the attributes
-            let slice: &[Archivable] = get_n_dict_objects(components, idx, num_attrs);
+                // The next set of values alternate between key and value pairs for the dictionary, if there are any
+                if num_attrs > 0 {
+                    idx += 1;
+                }
+                let dict_items = get_n_dict_objects(components, idx, num_attrs);
+                format_range_cache.insert(current_range_id, dict_items);
+                // Advance the iterator by the number of attributes we just consumed
+                idx += dict_items.len();
+                dict_items
+            };
 
             // Determine the type of the bubble and add it to the body parts vec
             if let Some(bubble) =
-                get_bubble_type(slice, text, current_start, current_end, &char_index_table)
+                get_bubble_type(slice, text, current_start, current_end, &utf16_to_byte)
             {
                 match bubble {
                     BubbleResult::New(item) => out_v.push(item),
                     BubbleResult::Continuation(effect) => match out_v.last_mut() {
-                        Some(BubbleComponent::Text(attrs)) => attrs.push(effect),
-                        _ => out_v.push(BubbleComponent::Text(vec![effect])),
+                        Some(BubbleComponent::Text(attrs)) => attrs.extend(effect),
+                        _ => out_v.push(BubbleComponent::Text(effect)),
                     },
                 }
             }
-
-            // Advance the iterator by the number of attributes we just consumed
-            idx += slice.len();
         }
     }
 
@@ -95,6 +111,8 @@ pub(crate) fn parse_body_typedstream<'a>(
     (!out_v.is_empty()).then_some(out_v)
 }
 
+/// Get the range of a component, if it is a range.
+/// The first item in the range is the ID of the set of styles, and the second item is the length of the range.
 fn get_range(component: &Archivable) -> Option<(&i64, &u64)> {
     if let Archivable::Data(items) = component {
         if items.len() == 2 {
@@ -108,9 +126,26 @@ fn get_range(component: &Archivable) -> Option<(&i64, &u64)> {
     None
 }
 
-/// Given the attributedBody range indexes, get the substring from the Rust representations `char_indices()`
-fn get_char_idx(text: &str, idx: usize, char_indices: &[usize]) -> usize {
-    char_indices.get(idx).map_or(text.len(), |i| *i)
+/// Build a table so that `utf16_to_byte[n]` gives the byte offset
+/// that corresponds to the *n*-th UTF-16 code-unit of `s`.
+fn build_utf16_to_byte_map(s: &str) -> Vec<usize> {
+    let mut map = Vec::with_capacity(s.encode_utf16().count() + 1);
+    let mut byte = 0;
+    for ch in s.chars() {
+        // how many UTF-16 units does this scalar use (1 or 2)
+        let units = ch.len_utf16();
+        for _ in 0..units {
+            map.push(byte);
+        }
+        byte += ch.len_utf8();
+    }
+    map.push(byte);
+    map
+}
+
+/// Given the `attributedBody` range indexes, get the substring indexes from the `UTF-16` representation.
+fn utf16_idx(text: &str, idx: usize, map: &[usize]) -> usize {
+    *map.get(idx).unwrap_or(&text.len())
 }
 
 /// Get the number of key/value object pairs in a `NSDictionary`
@@ -149,92 +184,119 @@ fn get_bubble_type<'a>(
     text: Option<&str>,
     start: usize,
     end: usize,
-    char_indices: &[usize],
+    utf16_to_byte: &[usize],
 ) -> Option<BubbleResult<'a>> {
-    let range_start = get_char_idx(text.as_ref()?, start, char_indices);
-    let range_end = get_char_idx(text.as_ref()?, end, char_indices);
+    // The start and end indexes are based on the `UTF-16` char indexes of the text, so we need to convert them
+    let range_start = utf16_idx(text.as_ref()?, start, utf16_to_byte);
+    let range_end = utf16_idx(text.as_ref()?, end, utf16_to_byte);
+
+    // Check for attachment first, because this is a different bubble type
+    if has_attribute(components, "__kIMFileTransferGUIDAttributeName") {
+        return Some(BubbleResult::New(BubbleComponent::Attachment(
+            AttachmentMeta::from_components(components)?,
+        )));
+    }
+
+    // Collect all text effects for this range
+    let effects = collect_text_effects(components, range_start, range_end);
+
+    // Return the effects, or Default if none found
+    let final_effects = if effects.is_empty() {
+        vec![TextAttributes::new(
+            range_start,
+            range_end,
+            TextEffect::Default,
+        )]
+    } else {
+        effects
+    };
+
+    Some(BubbleResult::Continuation(final_effects))
+}
+
+/// Check if components contain a specific attribute key
+fn has_attribute(components: &[Archivable], attribute_name: &str) -> bool {
+    components
+        .iter()
+        .any(|component| matches!(component.as_nsstring(), Some(key) if key == attribute_name))
+}
+
+/// Collect all text effects from the component attributes
+fn collect_text_effects(
+    components: &[Archivable],
+    range_start: usize,
+    range_end: usize,
+) -> Vec<TextAttributes<'_>> {
+    let mut effects = vec![];
+    let mut style_attributes = vec![];
+
     for (idx, key) in components.iter().enumerate() {
         if let Some(key_name) = key.as_nsstring() {
             match key_name {
-                "__kIMFileTransferGUIDAttributeName" => {
-                    return Some(BubbleResult::New(BubbleComponent::Attachment(
-                        AttachmentMeta::from_components(components)?,
-                    )));
-                }
                 "__kIMMentionConfirmedMention" => {
-                    return Some(BubbleResult::Continuation(TextAttributes::new(
-                        range_start,
-                        range_end,
-                        TextEffect::Mention(components.get(idx + 1)?.as_nsstring().unwrap_or("")),
-                    )));
+                    if let Some(mention_value) =
+                        components.get(idx + 1).and_then(|c| c.as_nsstring())
+                    {
+                        effects.push(TextAttributes::new(
+                            range_start,
+                            range_end,
+                            TextEffect::Mention(mention_value),
+                        ));
+                    }
                 }
                 "__kIMLinkAttributeName" => {
-                    return Some(BubbleResult::Continuation(TextAttributes::new(
-                        range_start,
-                        range_end,
-                        TextEffect::Link(components.get(idx + 2)?.as_nsstring().unwrap_or("#")),
-                    )));
+                    if let Some(link_value) = components.get(idx + 2).and_then(|c| c.as_nsstring())
+                    {
+                        effects.push(TextAttributes::new(
+                            range_start,
+                            range_end,
+                            TextEffect::Link(link_value),
+                        ));
+                    }
                 }
                 "__kIMOneTimeCodeAttributeName" => {
-                    return Some(BubbleResult::Continuation(TextAttributes::new(
-                        range_start,
-                        range_end,
-                        TextEffect::OTP,
-                    )));
+                    effects.push(TextAttributes::new(range_start, range_end, TextEffect::OTP));
                 }
                 "__kIMCalendarEventAttributeName" => {
-                    return Some(BubbleResult::Continuation(TextAttributes::new(
+                    effects.push(TextAttributes::new(
                         range_start,
                         range_end,
                         TextEffect::Conversion(Unit::Timezone),
-                    )));
-                }
-                // Any number of text styles can be applied to a message
-                "__kIMTextBoldAttributeName"
-                | "__kIMTextUnderlineAttributeName"
-                | "__kIMTextItalicAttributeName"
-                | "__kIMTextStrikethroughAttributeName" => {
-                    return Some(BubbleResult::Continuation(TextAttributes::new(
-                        range_start,
-                        range_end,
-                        TextEffect::Styles(resolve_styles(components)),
-                    )));
+                    ));
                 }
                 "__kIMTextEffectAttributeName" => {
-                    return Some(BubbleResult::Continuation(TextAttributes::new(
-                        range_start,
-                        range_end,
-                        TextEffect::Animated(Animation::from_id(
-                            *components.get(idx + 1)?.as_nsnumber_int().unwrap_or(&0),
-                        )),
-                    )));
+                    if let Some(effect_id) =
+                        components.get(idx + 1).and_then(|c| c.as_nsnumber_int())
+                    {
+                        effects.push(TextAttributes::new(
+                            range_start,
+                            range_end,
+                            TextEffect::Animated(Animation::from_id(*effect_id)),
+                        ));
+                    }
+                }
+                // Collect style attributes for later processing
+                "__kIMTextBoldAttributeName" => style_attributes.push(Style::Bold),
+                "__kIMTextUnderlineAttributeName" => style_attributes.push(Style::Underline),
+                "__kIMTextItalicAttributeName" => style_attributes.push(Style::Italic),
+                "__kIMTextStrikethroughAttributeName" => {
+                    style_attributes.push(Style::Strikethrough);
                 }
                 _ => {}
             }
         }
     }
-    Some(BubbleResult::Continuation(TextAttributes::new(
-        range_start,
-        range_end,
-        TextEffect::Default,
-    )))
-}
 
-/// Extract text styles from a range of key-value pairs
-fn resolve_styles(components: &[Archivable]) -> Vec<Style> {
-    let mut styles = vec![];
-    for key in components {
-        if let Some(key_name) = key.as_nsstring() {
-            match key_name {
-                "__kIMTextBoldAttributeName" => styles.push(Style::Bold),
-                "__kIMTextUnderlineAttributeName" => styles.push(Style::Underline),
-                "__kIMTextItalicAttributeName" => styles.push(Style::Italic),
-                "__kIMTextStrikethroughAttributeName" => styles.push(Style::Strikethrough),
-                _ => {}
-            }
-        }
+    // Add styles effect if any styles were found
+    if !style_attributes.is_empty() {
+        effects.push(TextAttributes::new(
+            range_start,
+            range_end,
+            TextEffect::Styles(style_attributes),
+        ));
     }
-    styles
+
+    effects
 }
 
 /// Fallback logic to parse the body from the message string content
@@ -1010,14 +1072,14 @@ mod typedstream_tests {
                 TextAttributes::new(3, 4, TextEffect::Default),
                 TextAttributes::new(4, 10, TextEffect::Animated(Animation::Small)),
                 TextAttributes::new(10, 15, TextEffect::Animated(Animation::Shake)),
-                TextAttributes::new(15, 16, TextEffect::Default),
+                TextAttributes::new(15, 16, TextEffect::Animated(Animation::Small)),
                 TextAttributes::new(16, 19, TextEffect::Animated(Animation::Nod)),
-                TextAttributes::new(19, 20, TextEffect::Default),
+                TextAttributes::new(19, 20, TextEffect::Animated(Animation::Small)),
                 TextAttributes::new(20, 28, TextEffect::Animated(Animation::Explode)),
                 TextAttributes::new(28, 34, TextEffect::Animated(Animation::Ripple)),
-                TextAttributes::new(34, 35, TextEffect::Default),
+                TextAttributes::new(34, 35, TextEffect::Animated(Animation::Explode)),
                 TextAttributes::new(35, 40, TextEffect::Animated(Animation::Bloom)),
-                TextAttributes::new(40, 41, TextEffect::Default),
+                TextAttributes::new(40, 41, TextEffect::Animated(Animation::Explode)),
                 TextAttributes::new(41, 47, TextEffect::Animated(Animation::Jitter)),
             ]),]
         );
@@ -1215,6 +1277,131 @@ mod typedstream_tests {
                     name: None
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn can_get_message_body_text_styled_plain_link() {
+        let mut m = Message::blank();
+        m.text = Some("https://github.com/ReagentX/imessage-exporter/discussions/553".to_string());
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .as_path()
+            .join("test_data/typedstream/StyledLink");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        m.components = parser.parse().ok();
+
+        m.components
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .for_each(|(idx, item)| println!("\t{idx}: {item:?}"));
+
+        assert_eq!(
+            parse_body_typedstream(
+                m.components.as_ref(),
+                m.text.as_deref(),
+                m.edited_parts.as_ref()
+            )
+            .unwrap(),
+            vec![BubbleComponent::Text(vec![
+                TextAttributes::new(0, 61, TextEffect::Animated(Animation::Big),),
+                TextAttributes::new(
+                    0,
+                    61,
+                    TextEffect::Link(
+                        "https://github.com/ReagentX/imessage-exporter/discussions/553"
+                    )
+                )
+            ]),]
+        );
+    }
+
+    #[test]
+    fn can_get_message_body_text_emoji() {
+        let mut m = Message::blank();
+        m.text = Some("🅱️Bold_Underline".to_string());
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .as_path()
+            .join("test_data/typedstream/EmojiBoldUnderline");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        m.components = parser.parse().ok();
+
+        m.components
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .for_each(|(idx, item)| println!("\t{idx}: {item:?}"));
+
+        assert_eq!(
+            parse_body_typedstream(
+                m.components.as_ref(),
+                m.text.as_deref(),
+                m.edited_parts.as_ref()
+            )
+            .unwrap(),
+            vec![BubbleComponent::Text(vec![
+                TextAttributes::new(0, 7, TextEffect::Default),
+                TextAttributes::new(7, 11, TextEffect::Styles(vec![Style::Bold])),
+                TextAttributes::new(11, 12, TextEffect::Default),
+                TextAttributes::new(12, 21, TextEffect::Styles(vec![Style::Underline])),
+            ]),]
+        );
+    }
+
+    #[test]
+    fn can_get_message_body_text_overlapping_format_ranges() {
+        let mut m = Message::blank();
+        m.text = Some("8:00 pm".to_string());
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .as_path()
+            .join("test_data/typedstream/OverlappingFormat");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        m.components = parser.parse().ok();
+
+        m.components
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .for_each(|(idx, item)| println!("\t{idx}: {item:?}"));
+
+        assert_eq!(
+            parse_body_typedstream(
+                m.components.as_ref(),
+                m.text.as_deref(),
+                m.edited_parts.as_ref()
+            )
+            .unwrap(),
+            vec![BubbleComponent::Text(vec![
+                TextAttributes::new(0, 1, TextEffect::Conversion(Unit::Timezone)),
+                TextAttributes::new(0, 1, TextEffect::Styles(vec![Style::Bold])),
+                TextAttributes::new(1, 2, TextEffect::Conversion(Unit::Timezone)),
+                TextAttributes::new(2, 4, TextEffect::Conversion(Unit::Timezone)),
+                TextAttributes::new(2, 4, TextEffect::Styles(vec![Style::Underline])),
+                TextAttributes::new(4, 5, TextEffect::Conversion(Unit::Timezone)),
+                TextAttributes::new(5, 7, TextEffect::Conversion(Unit::Timezone)),
+                TextAttributes::new(5, 7, TextEffect::Styles(vec![Style::Italic])),
+            ]),]
         );
     }
 }

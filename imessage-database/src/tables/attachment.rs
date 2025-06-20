@@ -39,12 +39,19 @@ const COLS: &str = "a.rowid, a.filename, a.uti, a.mime_type, a.transfer_name, a.
 /// The interior `str` contains the subtype, i.e. `x-m4a` for `audio/x-m4a`
 #[derive(Debug, PartialEq, Eq)]
 pub enum MediaType<'a> {
+    /// Image MIME type, such as `"image/png"` or `"image/jpeg"`
     Image(&'a str),
+    /// Video MIME type, such as `"video/mp4"` or `"video/quicktime"`
     Video(&'a str),
+    /// Audio MIME type, such as `"audio/mp3"` or `"audio/x-m4a`"
     Audio(&'a str),
+    /// Text MIME type, such as `"text/plain"` or `"text/html"`
     Text(&'a str),
+    /// Application MIME type, such as `"application/pdf"` or `"application/json"`
     Application(&'a str),
+    /// Other MIME types that don't fit the standard categories
     Other(&'a str),
+    /// Unknown MIME type when the type could not be determined
     Unknown,
 }
 
@@ -75,6 +82,7 @@ impl MediaType<'_> {
 /// Represents a single row in the `attachment` table.
 #[derive(Debug)]
 pub struct Attachment {
+    /// The unique identifier for the attachment in the database
     pub rowid: i32,
     /// The path to the file on disk
     pub filename: Option<String>,
@@ -88,6 +96,7 @@ pub struct Attachment {
     pub total_bytes: i64,
     /// `true` if the attachment was a sticker, else `false`
     pub is_sticker: bool,
+    /// Flag indicating whether the attachment should be hidden in the UI
     pub hide_attachment: i32,
     /// The prompt used to generate a Genmoji
     pub emoji_description: Option<String>,
@@ -112,14 +121,13 @@ impl Table for Attachment {
     }
 
     fn get(db: &Connection) -> Result<Statement, TableError> {
-        db.prepare(&format!("SELECT * from {ATTACHMENT}"))
-            .map_err(TableError::Attachment)
+        Ok(db.prepare(&format!("SELECT * from {ATTACHMENT}"))?)
     }
 
     fn extract(attachment: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
         match attachment {
             Ok(Ok(attachment)) => Ok(attachment),
-            Err(why) | Ok(Err(why)) => Err(TableError::Attachment(why)),
+            Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
         }
     }
 }
@@ -165,12 +173,9 @@ impl Attachment {
                         ",
                         msg.rowid
                     ))
-                })
-                .map_err(TableError::Attachment)?;
+                })?;
 
-            let iter = statement
-                .query_map([], |row| Ok(Attachment::from_row(row)))
-                .map_err(TableError::Attachment)?;
+            let iter = statement.query_map([], |row| Ok(Attachment::from_row(row)))?;
 
             for attachment in iter {
                 let m = Attachment::extract(attachment)?;
@@ -320,17 +325,15 @@ impl Attachment {
                 statement.push_str(&format!("    a.created_date <= {}", end / TIMESTAMP_FACTOR));
             }
 
-            db.prepare(&statement).map_err(TableError::Attachment)?
+            db.prepare(&statement)?
         } else {
             db.prepare(&format!(
                 "SELECT IFNULL(SUM(total_bytes), 0) FROM {ATTACHMENT}"
-            ))
-            .map_err(TableError::Attachment)?
+            ))?
         };
-        bytes_query
+        Ok(bytes_query
             .query_row([], |r| -> Result<i64> { r.get(0) })
-            .map(|res: i64| u64::try_from(res).unwrap_or(0))
-            .map_err(TableError::Attachment)
+            .map(|res: i64| u64::try_from(res).unwrap_or(0))?)
     }
 
     /// Given a platform and database source, resolve the path for the current attachment
@@ -394,12 +397,8 @@ impl Attachment {
         let mut total_attachments = 0;
         let mut null_attachments = 0;
         let mut size_on_disk: u64 = 0;
-        let mut statement_paths = db
-            .prepare(&format!("SELECT filename FROM {ATTACHMENT}"))
-            .map_err(TableError::Attachment)?;
-        let paths = statement_paths
-            .query_map([], |r| Ok(r.get(0)))
-            .map_err(TableError::Attachment)?;
+        let mut statement_paths = db.prepare(&format!("SELECT filename FROM {ATTACHMENT}"))?;
+        let paths = statement_paths.query_map([], |r| Ok(r.get(0)))?;
 
         let missing_files = paths
             .filter_map(Result::ok)

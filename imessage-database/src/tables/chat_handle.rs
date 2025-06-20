@@ -28,14 +28,13 @@ impl Table for ChatToHandle {
     }
 
     fn get(db: &Connection) -> Result<Statement, TableError> {
-        db.prepare(&format!("SELECT * FROM {CHAT_HANDLE_JOIN}"))
-            .map_err(TableError::ChatToHandle)
+        Ok(db.prepare(&format!("SELECT * FROM {CHAT_HANDLE_JOIN}"))?)
     }
 
     fn extract(chat_to_handle: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
         match chat_to_handle {
             Ok(Ok(chat_to_handle)) => Ok(chat_to_handle),
-            Err(why) | Ok(Err(why)) => Err(TableError::ChatToHandle(why)),
+            Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
         }
     }
 }
@@ -60,9 +59,7 @@ impl Cacheable for ChatToHandle {
         let mut cache: HashMap<i32, BTreeSet<i32>> = HashMap::new();
 
         let mut rows = ChatToHandle::get(db)?;
-        let mappings = rows
-            .query_map([], |row| Ok(ChatToHandle::from_row(row)))
-            .map_err(TableError::ChatToHandle)?;
+        let mappings = rows.query_map([], |row| Ok(ChatToHandle::from_row(row)))?;
 
         for mapping in mappings {
             let joiner = ChatToHandle::extract(mapping)?;
@@ -146,12 +143,10 @@ impl Diagnostic for ChatToHandle {
         processing();
 
         // Get the Chat IDs that are associated with messages
-        let mut statement_message_chats = db
-            .prepare(&format!("SELECT DISTINCT chat_id from {CHAT_MESSAGE_JOIN}"))
-            .map_err(TableError::ChatToHandle)?;
-        let statement_message_chat_rows = statement_message_chats
-            .query_map([], |row: &Row| -> Result<i32> { row.get(0) })
-            .map_err(TableError::ChatToHandle)?;
+        let mut statement_message_chats =
+            db.prepare(&format!("SELECT DISTINCT chat_id from {CHAT_MESSAGE_JOIN}"))?;
+        let statement_message_chat_rows =
+            statement_message_chats.query_map([], |row: &Row| -> Result<i32> { row.get(0) })?;
         let mut unique_chats_from_messages: HashSet<i32> = HashSet::new();
         statement_message_chat_rows.into_iter().for_each(|row| {
             if let Ok(row) = row {
@@ -160,12 +155,10 @@ impl Diagnostic for ChatToHandle {
         });
 
         // Get the Chat IDs that are associated with handles
-        let mut statement_handle_chats = db
-            .prepare(&format!("SELECT DISTINCT chat_id from {CHAT_HANDLE_JOIN}"))
-            .map_err(TableError::ChatToHandle)?;
-        let statement_handle_chat_rows = statement_handle_chats
-            .query_map([], |row: &Row| -> Result<i32> { row.get(0) })
-            .map_err(TableError::ChatToHandle)?;
+        let mut statement_handle_chats =
+            db.prepare(&format!("SELECT DISTINCT chat_id from {CHAT_HANDLE_JOIN}"))?;
+        let statement_handle_chat_rows =
+            statement_handle_chats.query_map([], |row: &Row| -> Result<i32> { row.get(0) })?;
         let mut unique_chats_from_handles: HashSet<i32> = HashSet::new();
         statement_handle_chat_rows.into_iter().for_each(|row| {
             if let Ok(row) = row {

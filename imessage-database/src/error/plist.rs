@@ -9,16 +9,27 @@ use std::fmt::{Display, Formatter, Result};
 /// Errors that can happen when parsing the plist data stored in the `payload_data` field
 #[derive(Debug)]
 pub enum PlistParseError {
+    /// Expected key was not found in the plist data
     MissingKey(String),
+    /// No value was found at the specified index
     NoValueAtIndex(usize),
+    /// Value had an incorrect type for the specified key
     InvalidType(String, String),
+    /// Value had an incorrect type at the specified index
     InvalidTypeIndex(usize, String),
+    /// Dictionary has mismatched number of keys and values
     InvalidDictionarySize(usize, usize),
+    /// No payload data was found
     NoPayload,
+    /// Message is not of the expected type
     WrongMessageType,
+    /// Could not parse an edited message
     InvalidEditedMessage(String),
+    /// Error from stream typed parsing
     StreamTypedError(StreamTypedError),
+    /// Error from handwriting data parsing
     HandwritingError(HandwritingError),
+    /// Error parsing Digital Touch message
     DigitalTouchError,
 }
 

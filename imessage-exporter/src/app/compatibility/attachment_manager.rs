@@ -4,20 +4,8 @@
 
 use std::{
     fmt::Display,
-    fs::{create_dir_all, metadata, remove_file, write},
+    fs::{create_dir_all, remove_file, write},
     path::{Path, PathBuf},
-};
-
-use crate::app::{
-    compatibility::{
-        backup::decrypt_file,
-        converters::{
-            audio::audio_copy_convert, common::copy_raw, image::image_copy_convert,
-            sticker::sticker_copy_convert, video::video_copy_convert,
-        },
-        models::{AudioConverter, Converter, ImageConverter, VideoConverter},
-    },
-    runtime::Config,
 };
 
 use imessage_database::{
@@ -28,7 +16,20 @@ use imessage_database::{
     },
 };
 
-use filetime::{FileTime, set_file_times};
+use crate::app::{
+    compatibility::{
+        backup::decrypt_file,
+        converters::{
+            audio::audio_copy_convert,
+            common::{copy_raw, update_file_metadata},
+            image::image_copy_convert,
+            sticker::sticker_copy_convert,
+            video::video_copy_convert,
+        },
+        models::{AudioConverter, Converter, HardwareEncoder, ImageConverter, VideoConverter},
+    },
+    runtime::Config,
+};
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct AttachmentManager {
@@ -36,6 +37,7 @@ pub struct AttachmentManager {
     pub image_converter: Option<ImageConverter>,
     pub audio_converter: Option<AudioConverter>,
     pub video_converter: Option<VideoConverter>,
+    hardware_encoder: Option<HardwareEncoder>,
 }
 
 impl AttachmentManager {
@@ -45,6 +47,7 @@ impl AttachmentManager {
             image_converter: ImageConverter::determine(),
             audio_converter: AudioConverter::determine(),
             video_converter: VideoConverter::determine(),
+            hardware_encoder: HardwareEncoder::detect(),
         }
     }
 }
@@ -223,6 +226,7 @@ impl AttachmentManager {
                                 &from,
                                 &mut to,
                                 converter,
+                                &self.hardware_encoder,
                                 attachment.mime_type(),
                             );
                         }
@@ -317,25 +321,6 @@ impl Display for AttachmentManagerMode {
             AttachmentManagerMode::Basic => write!(fmt, "basic"),
             AttachmentManagerMode::Clone => write!(fmt, "clone"),
             AttachmentManagerMode::Full => write!(fmt, "full"),
-        }
-    }
-}
-
-/// Update the metadata of a copied file, falling back to the original file's metadata if necessary
-fn update_file_metadata(from: &Path, to: &Path, message: &Message, config: &Config) {
-    // Update file metadata
-    if let Ok(metadata) = metadata(from) {
-        // The modification time is the message's date, otherwise the the original file's creation time
-        let mtime = match message.date(&config.offset) {
-            Ok(date) => FileTime::from_unix_time(date.timestamp(), date.timestamp_subsec_nanos()),
-            Err(_) => FileTime::from_last_modification_time(&metadata),
-        };
-
-        // The new last access time comes from the metadata of the original file
-        let atime = FileTime::from_last_access_time(&metadata);
-
-        if let Err(why) = set_file_times(to, atime, mtime) {
-            eprintln!("Unable to update {to:?} metadata: {why}");
         }
     }
 }

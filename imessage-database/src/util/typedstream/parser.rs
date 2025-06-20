@@ -73,9 +73,9 @@ impl<'a> TypedStreamReader<'a> {
         Self {
             stream,
             idx: 0,
-            types_table: vec![],
-            object_table: vec![],
-            seen_embedded_types: HashSet::new(),
+            types_table: Vec::with_capacity(16),
+            object_table: Vec::with_capacity(32),
+            seen_embedded_types: HashSet::with_capacity(8),
             placeholder: None,
         }
     }
@@ -251,14 +251,14 @@ impl<'a> TypedStreamReader<'a> {
         let pointer = self.get_current_byte()?;
         let result = u32::from(pointer)
             .checked_sub(REFERENCE_TAG as u32)
-            .ok_or(TypedStreamError::InvalidPointer(pointer));
+            .ok_or(TypedStreamError::InvalidPointer(pointer as usize));
         self.idx += 1;
         result
     }
 
     /// Read a class
     fn read_class(&mut self) -> Result<ClassResult, TypedStreamError> {
-        let mut out_v: Vec<Archivable> = vec![];
+        let mut out_v: Vec<Archivable> = Vec::with_capacity(4);
         match self.get_current_byte()? {
             START => {
                 // Skip some header bytes
@@ -338,22 +338,22 @@ impl<'a> TypedStreamReader<'a> {
         // Skip the 0x84
         self.idx += 1;
         match self.get_type(true)? {
-            Some(types) => self.read_types(types),
+            Some(type_index) => self.read_types(type_index),
             None => Ok(None),
         }
     }
 
     /// Gets the current type from the stream, either by reading it from the stream or reading it from
-    /// the specified index of [`TypedStreamReader::types_table`]. Because methods that use this type can also mutate self,
-    /// returning a reference here means other methods could make that reference to the table invalid,
-    /// which is disallowed in Rust. Thus, we return a clone of the cached data.
-    fn get_type(&mut self, embedded: bool) -> Result<Option<Vec<Type>>, TypedStreamError> {
+    /// the specified index of [`TypedStreamReader::types_table`]. Returns an index into the types table
+    /// to avoid cloning large type vectors.
+    fn get_type(&mut self, embedded: bool) -> Result<Option<usize>, TypedStreamError> {
         match self.get_current_byte()? {
             START => {
-                // Ignore repeated types, for example in a dict
+                // Skip the start byte
                 self.idx += 1;
 
                 let object_types = self.read_type()?;
+                let type_index = self.types_table.len();
 
                 // Embedded data is stored as a C String in the objects table
                 if embedded {
@@ -363,47 +363,50 @@ impl<'a> TypedStreamReader<'a> {
                     self.seen_embedded_types
                         .insert(self.object_table.len().saturating_sub(1) as u32);
                 }
+
                 self.types_table.push(object_types);
-                Ok(self.types_table.last().cloned())
+                Ok(Some(type_index))
             }
             END => {
                 // This indicates the end of the current object
                 Ok(None)
             }
             _ => {
-                // Ignore repeated types, for example in a dict
-                while self.get_current_byte()? == self.get_next_byte()? {
-                    self.idx += 1;
+                let ref_tag = self.read_pointer()?;
+
+                if ref_tag as usize >= self.types_table.len() {
+                    return Ok(None);
                 }
 
-                let ref_tag = self.read_pointer()?;
-                let result = self.types_table.get(ref_tag as usize);
-
                 if embedded {
-                    if let Some(res) = result {
-                        // We only want to include the first embedded reference tag, not subsequent references to the same embed
-                        if !self.seen_embedded_types.contains(&ref_tag) {
-                            self.object_table.push(Archivable::Type(res.clone()));
+                    // We only want to include the first embedded reference tag, not subsequent references to the same embed
+                    if !self.seen_embedded_types.contains(&ref_tag) {
+                        if let Some(types) = self.types_table.get(ref_tag as usize) {
+                            self.object_table.push(Archivable::Type(types.clone()));
                             self.seen_embedded_types.insert(ref_tag);
                         }
                     }
                 }
 
-                Ok(result.cloned())
+                Ok(Some(ref_tag as usize))
             }
         }
     }
 
-    /// Given some [`Type`]s, look at the stream and parse the data according to the specified [`Type`]
-    fn read_types(
-        &mut self,
-        found_types: Vec<Type>,
-    ) -> Result<Option<Archivable>, TypedStreamError> {
-        let mut out_v = vec![];
+    /// Given some [`Type`]s referenced by index, look at the stream and parse the data according to the specified [`Type`]
+    fn read_types(&mut self, type_index: usize) -> Result<Option<Archivable>, TypedStreamError> {
+        // Validate the index first
+        if type_index >= self.types_table.len() {
+            return Err(TypedStreamError::InvalidPointer(type_index));
+        }
+
+        let mut out_v = Vec::with_capacity(8);
         let mut is_obj: bool = false;
 
-        for found_type in found_types {
-            match found_type {
+        // Process types one by one to avoid borrowing conflicts
+        let types_len = self.types_table[type_index].len();
+        for i in 0..types_len {
+            match &self.types_table[type_index][i] {
                 Type::Utf8String => out_v.push(OutputData::String(self.read_string()?)),
                 Type::EmbeddedData => {
                     return self.read_embedded_data();
@@ -414,7 +417,7 @@ impl<'a> TypedStreamReader<'a> {
                     self.placeholder = Some(length);
                     self.object_table.push(Archivable::Placeholder);
                     if let Some(object) = self.read_object()? {
-                        match object.clone() {
+                        match object {
                             Archivable::Object(_, data) => {
                                 // If this is a new object, i.e. one without any data, we add the data into it later
                                 // If the object already has data in it, we just want to return that object
@@ -424,10 +427,10 @@ impl<'a> TypedStreamReader<'a> {
                                     self.object_table.pop();
                                     return result;
                                 }
-                                out_v.extend(data);
+                                out_v.extend_from_slice(data);
                             }
-                            Archivable::Class(cls) => out_v.push(OutputData::Class(cls)),
-                            Archivable::Data(data) => out_v.extend(data),
+                            Archivable::Class(cls) => out_v.push(OutputData::Class(cls.clone())),
+                            Archivable::Data(data) => out_v.extend_from_slice(data),
                             // These cases are used internally in the objects table but should not be present in any output
                             Archivable::Placeholder | Archivable::Type(_) => {}
                         }
@@ -439,9 +442,9 @@ impl<'a> TypedStreamReader<'a> {
                 }
                 Type::Float => out_v.push(OutputData::Float(self.read_float()?)),
                 Type::Double => out_v.push(OutputData::Double(self.read_double()?)),
-                Type::Unknown(byte) => out_v.push(OutputData::Byte(byte)),
-                Type::String(s) => out_v.push(OutputData::String(s)),
-                Type::Array(size) => out_v.push(OutputData::Array(self.read_array(size)?)),
+                Type::Unknown(byte) => out_v.push(OutputData::Byte(*byte)),
+                Type::String(s) => out_v.push(OutputData::String(s.to_string())),
+                Type::Array(size) => out_v.push(OutputData::Array(self.read_array(*size)?)),
             }
         }
 
@@ -455,25 +458,26 @@ impl<'a> TypedStreamReader<'a> {
                 // if we get a placeholder and then find a new class heirarchy, the object table holds the class chain
                 // in descending order of inheritance
                 } else if let Some(Archivable::Class(class)) = self.object_table.get(spot + 1) {
-                    self.object_table[spot] = Archivable::Object(class.clone(), out_v.clone());
+                    self.object_table[spot] = Archivable::Object(class.clone(), out_v);
                     self.placeholder = None;
                     return Ok(self.object_table.get(spot).cloned());
                 // We got some data for a class that was already seen
                 } else if let Some(Archivable::Object(_, data)) = self.object_table.get_mut(spot) {
-                    data.extend(out_v.clone());
+                    data.extend(out_v);
                     self.placeholder = None;
                     return Ok(self.object_table.get(spot).cloned());
                 // We got some data that is not part of a class, i.e. a field in the parent object for which we don't know the name
                 } else {
-                    self.object_table[spot] = Archivable::Data(out_v.clone());
+                    self.object_table[spot] = Archivable::Data(out_v);
                     self.placeholder = None;
                     return Ok(self.object_table.get(spot).cloned());
                 }
             }
         }
 
+        // If we have no object, but have data, return it as a Data type
         if !out_v.is_empty() && !is_obj {
-            return Ok(Some(Archivable::Data(out_v.clone())));
+            return Ok(Some(Archivable::Data(out_v)));
         }
         Ok(None)
     }
@@ -525,7 +529,7 @@ impl<'a> TypedStreamReader<'a> {
     /// ]
     /// ```
     pub fn parse(&mut self) -> Result<Vec<Archivable>, TypedStreamError> {
-        let mut out_v = vec![];
+        let mut out_v = Vec::with_capacity(16); // Pre-allocate for better performance
 
         self.validate_header()?;
 
@@ -536,8 +540,8 @@ impl<'a> TypedStreamReader<'a> {
             }
 
             // First, get the current type
-            if let Some(found_types) = self.get_type(false)? {
-                let result = self.read_types(found_types);
+            if let Some(type_index) = self.get_type(false)? {
+                let result = self.read_types(type_index);
                 if let Ok(Some(res)) = result {
                     out_v.push(res);
                 }

@@ -98,7 +98,7 @@ impl<'a> Exporter<'a> for TXT<'a> {
 
         let messages = statement
             .query_map([], |row| Ok(Message::from_row(row)))
-            .map_err(|err| RuntimeError::DatabaseError(TableError::Messages(err)))?;
+            .map_err(|err| RuntimeError::DatabaseError(TableError::QueryError(err)))?;
 
         for message in messages {
             let mut msg = Message::extract(message)?;
@@ -731,10 +731,17 @@ impl<'a> Writer<'a> for TXT<'a> {
         None
     }
 
-    fn format_attributes(&'a self, text: &'a str, effects: &'a [TextAttributes]) -> String {
-        let mut formatted_text: String = String::with_capacity(text.len());
-        for effect in effects {
-            if let Some(message_content) = text.get(effect.start..effect.end) {
+    fn format_attributes(&'a self, text: &'a str, attributes: &'a [TextAttributes]) -> String {
+        let mut formatted_text = String::with_capacity(text.len());
+        let mut prev_start = 0;
+        let mut prev_end = 0;
+
+        for effect in attributes {
+            if prev_start == effect.start && prev_end == effect.end {
+                continue;
+            } else if let Some(message_content) = text.get(effect.start..effect.end) {
+                prev_start = effect.start;
+                prev_end = effect.end;
                 // There isn't really a way to represent formatted text in a plain text export
                 formatted_text.push_str(message_content);
             }
@@ -2401,6 +2408,142 @@ mod balloon_format_tests {
         let actual = "app_name message:\ntitle\nsubtitle\ncaption\nsubcaption\ntrailing_caption\ntrailing_subcaption";
 
         assert_eq!(expected, actual);
+    }
+}
+
+#[cfg(test)]
+mod text_effect_tests {
+    use crate::{Config, Exporter, Options, TXT, exporters::exporter::Writer};
+    use imessage_database::util::typedstream::parser::TypedStreamReader;
+    use std::{env::current_dir, fs::File, io::Read};
+
+    #[test]
+    fn can_format_txt_text_styles_mixed_end_to_end() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some("Underline normal jitter normal".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/TextStylesMixed");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "May 17, 2022  5:29:42 PM\nMe\nUnderline normal jitter normal\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_text_styled_plain_link() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text =
+            Some("https://github.com/ReagentX/imessage-exporter/discussions/553".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/StyledLink");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "May 17, 2022  5:29:42 PM\nMe\nhttps://github.com/ReagentX/imessage-exporter/discussions/553\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_text_styled_emoji_bold_underline() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some("🅱️Bold_Underline".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/EmojiBoldUnderline");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "May 17, 2022  5:29:42 PM\nMe\n🅱️Bold_Underline\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_text_styled_overlapping_ranges() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some("8:00 pm".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/OverlappingFormat");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "May 17, 2022  5:29:42 PM\nMe\n8:00 pm\n\n";
+
+        assert_eq!(actual, expected);
     }
 }
 

@@ -3,10 +3,10 @@
 
  # Iterating over Message Data
 
- Generally, use [`Message::get()`] or [`Message::stream_rows()`] to iterate over message rows.
+ Generally, use [`Message::stream()`] to iterate over message rows.
 
  ## Example
- ```rust
+ ```no_run
  use imessage_database::{
      tables::{
          messages::Message,
@@ -15,14 +15,20 @@
      util::dirs::default_db_path,
  };
 
+ // Your custom error type
+ struct ProgramError;
+
+ // Get the default database path and connect to it
  let db_path = default_db_path();
  let conn = get_connection(&db_path).unwrap();
 
- let mut statement = Message::get(&conn).unwrap();
-
- let messages = statement.query_map([], |row| Ok(Message::from_row(row))).unwrap();
-
- messages.map(|msg| println!("{:#?}", Message::extract(msg)));
+ Message::stream(&conn, |message_result| {
+    match message_result {
+        Ok(message) => println!("Message: {:#?}", message),
+        Err(e) => eprintln!("Error: {:?}", e),
+    }
+    Ok::<(), ProgramError>(())
+ }).unwrap();
  ```
 
  # Making Custom Message Queries
@@ -75,7 +81,7 @@
  The following will return an iterator over messages that have an associated emoji:
 
 
- ```rust
+ ```no_run
  use imessage_database::{
      tables::{
          messages::Message,
@@ -105,7 +111,7 @@
 
  let messages = statement.query_map([], |row| Ok(Message::from_row(row))).unwrap();
 
- messages.map(|msg| println!("{:#?}", Message::extract(msg)));
+ messages.for_each(|msg| println!("{:#?}", Message::extract(msg)));
  ```
 */
 
@@ -153,7 +159,9 @@ pub(crate) const COLS: &str = "rowid, guid, text, service, handle_id, destinatio
 #[derive(Debug)]
 #[allow(non_snake_case)]
 pub struct Message {
+    /// The unique identifier for the message in the database
     pub rowid: i32,
+    /// The globally unique identifier for the message
     pub guid: String,
     /// The text of the message, which may require calling [`Self::generate_text()`] to populate
     pub text: Option<String>,
@@ -258,16 +266,16 @@ impl Table for Message {
     /// Convert data from the messages table to native Rust data structures, falling back to
     /// more compatible queries to ensure compatibility with older database schemas
     fn get(db: &Connection) -> Result<Statement, TableError> {
-        db.prepare(&ios_16_newer_query(None))
+        Ok(db
+            .prepare(&ios_16_newer_query(None))
             .or_else(|_| db.prepare(&ios_14_15_query(None)))
-            .or_else(|_| db.prepare(&ios_13_older_query(None)))
-            .map_err(TableError::Messages)
+            .or_else(|_| db.prepare(&ios_13_older_query(None)))?)
     }
 
     fn extract(message: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
         match message {
             Ok(Ok(message)) => Ok(message),
-            Err(why) | Ok(Err(why)) => Err(TableError::Messages(why)),
+            Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
         }
     }
 }
@@ -288,9 +296,8 @@ impl Diagnostic for Message {
     /// ```
     fn run_diagnostic(db: &Connection) -> Result<(), TableError> {
         processing();
-        let mut messages_without_chat = db
-            .prepare(&format!(
-                "
+        let mut messages_without_chat = db.prepare(&format!(
+            "
             SELECT
                 COUNT(m.rowid)
             FROM
@@ -301,16 +308,14 @@ impl Diagnostic for Message {
             ORDER BY
                 m.date
             "
-            ))
-            .map_err(TableError::Messages)?;
+        ))?;
 
         let num_dangling: i32 = messages_without_chat
             .query_row([], |r| r.get(0))
             .unwrap_or(0);
 
-        let mut messages_in_more_than_one_chat_q = db
-            .prepare(&format!(
-                "
+        let mut messages_in_more_than_one_chat_q = db.prepare(&format!(
+            "
             SELECT
                 COUNT(*)
             FROM (
@@ -322,23 +327,20 @@ impl Diagnostic for Message {
                 message_id
             HAVING c > 1);
             "
-            ))
-            .map_err(TableError::Messages)?;
+        ))?;
 
         let messages_in_more_than_one_chat: i32 = messages_in_more_than_one_chat_q
             .query_row([], |r| r.get(0))
             .unwrap_or(0);
 
-        let mut messages_count = db
-            .prepare(&format!(
-                "
+        let mut messages_count = db.prepare(&format!(
+            "
             SELECT
                 COUNT(rowid)
             FROM
                 {MESSAGE}
             "
-            ))
-            .map_err(TableError::Messages)?;
+        ))?;
 
         let total_messages: i64 = messages_count.query_row([], |r| r.get(0)).unwrap_or(0);
 
@@ -408,9 +410,7 @@ impl Cacheable for Message {
 
         if let Ok(mut statement) = statement {
             // Execute query to build the message tapback map
-            let messages = statement
-                .query_map([], |row| Ok(Message::from_row(row)))
-                .map_err(TableError::Messages)?;
+            let messages = statement.query_map([], |row| Ok(Message::from_row(row)))?;
 
             // Iterate over the messages and update the map
             for message in messages {
@@ -487,8 +487,7 @@ impl Message {
 
             // If the above parsing failed, fall back to the legacy parser instead
             if self.text.is_none() {
-                self.text =
-                    Some(streamtyped::parse(body).map_err(MessageError::StreamTypedParseError)?);
+                self.text = Some(streamtyped::parse(body)?);
             }
         }
 
@@ -806,11 +805,9 @@ impl Message {
                     {}",
                     Self::generate_filter_statement(context, false)
                 ))
-            })
-            .map_err(TableError::Messages)?
+            })?
         } else {
-            db.prepare(&format!("SELECT COUNT(*) FROM {MESSAGE}"))
-                .map_err(TableError::Messages)?
+            db.prepare(&format!("SELECT COUNT(*) FROM {MESSAGE}"))?
         };
         // Execute query, defaulting to zero if it fails
         let count: u64 = statement.query_row([], |r| r.get(0)).unwrap_or(0);
@@ -845,20 +842,20 @@ impl Message {
         if !context.has_filters() {
             return Self::get(db);
         }
-        db.prepare(&ios_16_newer_query(Some(&Self::generate_filter_statement(
-            context, true,
-        ))))
-        .or_else(|_| {
-            db.prepare(&ios_14_15_query(Some(&Self::generate_filter_statement(
-                context, false,
+        Ok(db
+            .prepare(&ios_16_newer_query(Some(&Self::generate_filter_statement(
+                context, true,
             ))))
-        })
-        .or_else(|_| {
-            db.prepare(&ios_13_older_query(Some(&Self::generate_filter_statement(
-                context, false,
-            ))))
-        })
-        .map_err(TableError::Messages)
+            .or_else(|_| {
+                db.prepare(&ios_14_15_query(Some(&Self::generate_filter_statement(
+                    context, false,
+                ))))
+            })
+            .or_else(|_| {
+                db.prepare(&ios_13_older_query(Some(&Self::generate_filter_statement(
+                    context, false,
+                ))))
+            })?)
     }
 
     /// See [`Tapback`] for details on this data.
@@ -899,12 +896,9 @@ impl Message {
             // No iOS 13 and prior used here because `thread_originator_guid` is not present in that schema
             let mut statement = db
                 .prepare(&ios_16_newer_query(Some(&filters)))
-                .or_else(|_| db.prepare(&ios_14_15_query(Some(&filters))))
-                .map_err(TableError::Messages)?;
+                .or_else(|_| db.prepare(&ios_14_15_query(Some(&filters))))?;
 
-            let iter = statement
-                .query_map([], |row| Ok(Message::from_row(row)))
-                .map_err(TableError::Messages)?;
+            let iter = statement.query_map([], |row| Ok(Message::from_row(row)))?;
 
             for message in iter {
                 let m = Message::extract(message)?;
@@ -1196,8 +1190,7 @@ impl Message {
         let mut statement = db
             .prepare(&ios_16_newer_query(Some(&filters)))
             .or_else(|_| db.prepare(&ios_14_15_query(Some(&filters))))
-            .or_else(|_| db.prepare(&ios_13_older_query(Some(&filters))))
-            .map_err(TableError::Messages)?;
+            .or_else(|_| db.prepare(&ios_13_older_query(Some(&filters))))?;
 
         Message::extract(statement.query_row([], |row| Ok(Message::from_row(row))))
     }
@@ -1206,6 +1199,7 @@ impl Message {
 #[cfg(test)]
 impl Message {
     #[must_use]
+    /// Create a blank test message with default values
     pub fn blank() -> Message {
         Message {
             rowid: i32::default(),

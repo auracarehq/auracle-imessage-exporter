@@ -14,6 +14,7 @@ use crate::{
 /// Represents a single row in the `handle` table.
 #[derive(Debug)]
 pub struct Handle {
+    /// The unique identifier for the handle in the database
     pub rowid: i32,
     /// Identifier for a contact, i.e. a phone number or email address
     pub id: String,
@@ -31,14 +32,13 @@ impl Table for Handle {
     }
 
     fn get(db: &Connection) -> Result<Statement, TableError> {
-        db.prepare(&format!("SELECT * from {HANDLE}"))
-            .map_err(TableError::Handle)
+        Ok(db.prepare(&format!("SELECT * from {HANDLE}"))?)
     }
 
     fn extract(handle: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
         match handle {
             Ok(Ok(handle)) => Ok(handle),
-            Err(why) | Ok(Err(why)) => Err(TableError::Handle(why)),
+            Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
         }
     }
 }
@@ -70,9 +70,7 @@ impl Cacheable for Handle {
         let mut statement = Handle::get(db)?;
 
         // Execute query to build the Handles
-        let handles = statement
-            .query_map([], |row| Ok(Handle::from_row(row)))
-            .map_err(TableError::Handle)?;
+        let handles = statement.query_map([], |row| Ok(Handle::from_row(row)))?;
 
         // Iterate over the handles and update the map
         for handle in handles {
@@ -169,12 +167,10 @@ impl Diagnostic for Handle {
             "WHERE person_centric_id NOT NULL"
         );
 
-        if let Ok(mut rows) = db.prepare(query).map_err(TableError::Handle) {
+        if let Ok(mut rows) = db.prepare(query) {
             processing();
 
-            let count_dupes: Option<i32> = rows
-                .query_row([], |r| r.get(0))
-                .map_err(TableError::Handle)?;
+            let count_dupes: Option<i32> = rows.query_row([], |r| r.get(0))?;
 
             done_processing();
 
@@ -213,22 +209,15 @@ impl Handle {
 
         if let Ok(mut statement) = statement {
             // Cache the results of the query in memory
-            let contacts = statement
-                .query_map([], |row| {
-                    let person_centric_id: String = row.get(0)?;
-                    let rowid: i32 = row.get(1)?;
-                    let id: String = row.get(2)?;
-                    Ok((person_centric_id, rowid, id))
-                })
-                .map_err(TableError::Handle)?;
+            let contacts = statement.query_map([], |row| {
+                let person_centric_id: String = row.get(0)?;
+                let rowid: i32 = row.get(1)?;
+                let id: String = row.get(2)?;
+                Ok((person_centric_id, rowid, id))
+            })?;
 
             for contact in contacts {
-                match contact {
-                    Ok(tup) => {
-                        row_data.push(tup);
-                    }
-                    Err(why) => return Err(TableError::Handle(why)),
-                }
+                row_data.push(contact?);
             }
 
             // First pass: generate a map of each person_centric_id to its matching ids

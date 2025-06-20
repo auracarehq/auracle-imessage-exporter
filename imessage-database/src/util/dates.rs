@@ -9,6 +9,11 @@ use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 use crate::error::message::MessageError;
 
 const SEPARATOR: &str = ", ";
+
+/// Factor used to convert between nanosecond-precision timestamps and seconds
+///
+/// The iMessage database stores timestamps as nanoseconds, so this factor is used
+/// to convert between the database format and standard Unix timestamps.
 pub const TIMESTAMP_FACTOR: i64 = 1000000000;
 
 /// Get the date offset for the iMessage Database

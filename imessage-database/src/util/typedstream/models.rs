@@ -176,7 +176,6 @@ impl Archivable {
 /// Represents primitive types of data that can be stored in a `typedstream`
 ///
 /// These type encodings are partially documented [here](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html#//apple_ref/doc/uid/TP40008048-CH100-SW1) by Apple.
-// TODO: Remove clone
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     /// Encoded string data, usually embedded in an object. Denoted by:
@@ -240,8 +239,10 @@ pub enum Type {
 }
 
 impl Type {
+    /// Convert a byte to a Type enum variant
+    #[inline]
     pub(crate) fn from_byte(byte: &u8) -> Self {
-        match byte {
+        match *byte {
             0x40 => Self::Object,
             0x2B => Self::Utf8String,
             0x2A => Self::EmbeddedData,
@@ -249,10 +250,11 @@ impl Type {
             0x64 => Self::Double,
             0x63 | 0x69 | 0x6c | 0x71 | 0x73 => Self::SignedInt,
             0x43 | 0x49 | 0x4c | 0x51 | 0x53 => Self::UnsignedInt,
-            other => Self::Unknown(*other),
+            other => Self::Unknown(other),
         }
     }
 
+    #[inline]
     pub(crate) fn new_string(string: String) -> Self {
         Self::String(string)
     }

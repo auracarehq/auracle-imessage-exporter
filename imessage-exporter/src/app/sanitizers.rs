@@ -10,6 +10,8 @@ use std::borrow::Cow;
 /// Characters disallowed in a filename
 static FILENAME_DISALLOWED_CHARS: LazyLock<HashSet<char>> =
     LazyLock::new(|| HashSet::from(['*', '"', '/', '\\', '<', '>', ':', '|', '?']));
+/// The character to replace disallowed chars with
+const FILENAME_REPLACEMENT_CHAR: char = '_';
 
 /// Characters disallowed in HTML
 static HTML_DISALLOWED_CHARS: LazyLock<HashMap<char, &str>> = LazyLock::new(|| {
@@ -23,10 +25,11 @@ static HTML_DISALLOWED_CHARS: LazyLock<HashMap<char, &str>> = LazyLock::new(|| {
         (' ', "&nbsp;"),
     ])
 });
-/// The character to replace disallowed chars with
-const FILENAME_REPLACEMENT_CHAR: char = '_';
 
 /// Remove unsafe chars in [this list](FILENAME_DISALLOWED_CHARS).
+///
+/// Does not need to use a `Cow` for optimization because the source is always generated based on chat data
+/// so there is no opportunity for the original input to be passed in from another borrow.
 pub fn sanitize_filename(filename: &str) -> String {
     filename
         .chars()
@@ -40,7 +43,7 @@ pub fn sanitize_filename(filename: &str) -> String {
         .collect()
 }
 
-/// Escapes HTML special characters in the input string.
+/// Escapes HTML special characters in the input string, allocating a new string only if necessary.
 pub fn sanitize_html(input: &str) -> Cow<str> {
     for (idx, c) in input.char_indices() {
         if HTML_DISALLOWED_CHARS.contains_key(&c) {

@@ -59,10 +59,13 @@ pub enum StickerEffect {
     Normal,
     /// Internally referred to as `stroke`
     Outline,
+    /// Comic effect applied to the sticker
     Comic,
+    /// Puffy effect applied to the sticker
     Puffy,
     /// Internally referred to as `iridescent`
     Shiny,
+    /// Other unrecognized sticker effect
     Other(String),
 }
 

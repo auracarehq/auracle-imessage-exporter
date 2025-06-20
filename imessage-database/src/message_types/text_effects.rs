@@ -40,11 +40,17 @@ pub enum TextEffect<'a> {
 /// Read more about unit conversions [here](https://www.macrumors.com/how-to/convert-currencies-temperatures-more-ios-16/).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Unit {
+    /// Currency conversion
     Currency,
+    /// Distance conversion
     Distance,
+    /// Temperature conversion
     Temperature,
+    /// Timezone conversion
     Timezone,
+    /// Volume conversion
     Volume,
+    /// Weight conversion
     Weight,
 }
 

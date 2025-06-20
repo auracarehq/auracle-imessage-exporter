@@ -47,6 +47,7 @@ pub enum Service<'a> {
 }
 
 impl<'a> Service<'a> {
+    /// Creates a [`Service`] enum variant based on the provided service name string
     #[must_use]
     pub fn from(service: Option<&'a str>) -> Self {
         if let Some(service_name) = service {
@@ -106,6 +107,7 @@ pub struct TextAttributes<'a> {
 }
 
 impl<'a> TextAttributes<'a> {
+    /// Creates a new [`TextAttributes`] with the specified start index, end index, and text effect.
     #[must_use]
     pub fn new(start: usize, end: usize, effect: TextEffect<'a>) -> Self {
         Self { start, end, effect }

@@ -1,5 +1,9 @@
 use std::{
     borrow::Cow,
+    cmp::{
+        Ordering::{Equal, Greater, Less},
+        min,
+    },
     collections::{
         HashMap,
         hash_map::Entry::{Occupied, Vacant},
@@ -56,6 +60,16 @@ const HEADER: &str = "<html>\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"vie
 const FOOTER: &str = "</body></html>";
 const STYLE: &str = include_str!("resources/style.css");
 
+#[derive(Debug, Clone)]
+/// [`EventType`] is used to track the start and end of HTML text attributes
+/// so we can render them correctly in the HTML output.
+enum EventType<'a> {
+    /// Start event for text attributes, contains the index of the text part
+    Start(usize, &'a TextAttributes<'a>),
+    /// End event for text attributes, contains the index of the text part
+    End(usize),
+}
+
 pub struct HTML<'a> {
     /// Data that is setup from the application's runtime
     pub config: &'a Config,
@@ -107,7 +121,7 @@ impl<'a> Exporter<'a> for HTML<'a> {
 
         let messages = statement
             .query_map([], |row| Ok(Message::from_row(row)))
-            .map_err(|err| RuntimeError::DatabaseError(TableError::Messages(err)))?;
+            .map_err(|err| RuntimeError::DatabaseError(TableError::QueryError(err)))?;
 
         for message in messages {
             let mut msg = Message::extract(message)?;
@@ -986,15 +1000,59 @@ impl<'a> Writer<'a> for HTML<'a> {
     }
 
     fn format_attributes(&'a self, text: &'a str, attributes: &'a [TextAttributes]) -> String {
-        let mut formatted_text = String::with_capacity(text.len());
-        for effect in attributes {
-            if let Some(message_content) = text.get(effect.start..effect.end) {
-                // We cannot sanitize the html beforehand because it may change the length of the text
-                formatted_text
-                    .push_str(&self.format_effect(&sanitize_html(message_content), &effect.effect));
-            }
+        if attributes.is_empty() {
+            return text.to_string();
         }
-        formatted_text
+
+        // Create events for attribute starts and ends
+        let mut events = Vec::new();
+
+        // Create events for each attribute, marking start and end positions. The ID is the index of the attribute in the list.
+        for (attr_id, attr) in attributes.iter().enumerate() {
+            events.push((attr.start, EventType::Start(attr_id, attr)));
+            events.push((attr.end, EventType::End(attr_id)));
+        }
+
+        // Sort events by position, with ends before starts at the same position
+        events.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| match (&a.1, &b.1) {
+                (EventType::End(_), EventType::Start(_, _)) => Less,
+                (EventType::Start(_, _), EventType::End(_)) => Greater,
+                _ => Equal,
+            })
+        });
+
+        let mut result = String::new();
+        // The currently active attributes, stored as (attribute ID, TextAttributes)
+        let mut active_attrs: Vec<(usize, &TextAttributes)> = Vec::new();
+        let mut last_pos = events.first().map_or(0, |(pos, _)| *pos);
+
+        for (pos, event) in events {
+            // Add text before this event with current active attributes
+            if pos > last_pos && last_pos < text.len() {
+                // Get the text slice from last position to current position
+                let end_pos = min(pos, text.len());
+                let text_slice = &text[last_pos..end_pos];
+                // Sanitize the text slice
+                let sanitized_text = sanitize_html(text_slice);
+                result.push_str(&self.apply_active_attributes(&sanitized_text, &active_attrs));
+            }
+
+            // Update active attributes based on the event
+            match event {
+                EventType::Start(attr_id, attr) => {
+                    // Add the attribute that starts
+                    active_attrs.push((attr_id, attr));
+                }
+                EventType::End(attr_id) => {
+                    // Remove the attribute that ends
+                    active_attrs.retain(|(id, _)| *id != attr_id);
+                }
+            }
+
+            last_pos = pos;
+        }
+        result
     }
 
     fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
@@ -1596,6 +1654,35 @@ impl HTML<'_> {
         format!(
             "<{tag}><tr><td><span class=\"timestamp\">{timestamp}</span></td><td>{text}</td></tr></{tag}>"
         )
+    }
+
+    fn apply_active_attributes<'a>(
+        &'a self,
+        text: &'a str,
+        active_attrs: &'a [(usize, &TextAttributes)],
+    ) -> Cow<'a, str> {
+        // If there are no active attributes, return the original text
+        if active_attrs.is_empty() {
+            return Cow::Borrowed(text);
+        }
+
+        // If there are active attributes, we need to format the text
+        let mut result = Cow::Borrowed(text);
+
+        // Iterate through the active attributes and apply their effects
+        // If we encounter a TextEffect that modifies the text, we will convert it to an owned type
+        // to ensure we can modify it.
+        for (_, attr) in active_attrs {
+            // If the effect is `Default`, we can skip it, because it does not modify the text
+            if !matches!(attr.effect, TextEffect::Default) {
+                // Once we need to modify, convert to owned and stay owned
+                let owned_text = result.into_owned();
+                let formatted = self.format_effect(&owned_text, &attr.effect);
+                result = Cow::Owned(formatted.into_owned());
+            }
+        }
+
+        result
     }
 
     fn balloon_to_html(
@@ -3386,7 +3473,7 @@ mod text_effect_tests {
         message.components = parser.parse().ok();
 
         let actual = exporter.format_message(&message, 0).unwrap();
-        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><span class=\"animationBig\">Big</span> <span class=\"animationSmall\">small </span><span class=\"animationShake\">shake</span> <span class=\"animationNod\">nod</span> <span class=\"animationExplode\">explode </span><span class=\"animationRipple\">ripple</span> <span class=\"animationBloom\">bloom</span> <span class=\"animationJitter\">jitter</span></span>\n</div>\n</div>\n</div>\n";
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><span class=\"animationBig\">Big</span> <span class=\"animationSmall\">small </span><span class=\"animationShake\">shake</span><span class=\"animationSmall\"> </span><span class=\"animationNod\">nod</span><span class=\"animationSmall\"> </span><span class=\"animationExplode\">explode </span><span class=\"animationRipple\">ripple</span><span class=\"animationExplode\"> </span><span class=\"animationBloom\">bloom</span><span class=\"animationExplode\"> </span><span class=\"animationJitter\">jitter</span></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -3483,6 +3570,103 @@ mod text_effect_tests {
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>Underline</u> normal <span class=\"animationJitter\">jitter</span> normal</span>\n</div>\n</div>\n</div>\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_text_styled_plain_link() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text =
+            Some("https://github.com/ReagentX/imessage-exporter/discussions/553".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/StyledLink");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><a href=\"https://github.com/ReagentX/imessage-exporter/discussions/553\"><span class=\"animationBig\">https://github.com/ReagentX/imessage-exporter/discussions/553</span></a></span>\n</div>\n</div>\n</div>\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_text_styled_emoji_bold_underline() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some("🅱️Bold_Underline".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/EmojiBoldUnderline");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">🅱\u{fe0f}<b>Bold</b>_<u>Underline</u></span>\n</div>\n</div>\n</div>\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_text_styled_overlapping_ranges() {
+        // Create exporter
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some("8:00 pm".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        let typedstream_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/typedstream/OverlappingFormat");
+        let mut file = File::open(typedstream_path).unwrap();
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).unwrap();
+
+        let mut parser = TypedStreamReader::from(&bytes);
+        message.components = parser.parse().ok();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><b><u>8</u></b><u>:</u><u><u>00</u></u><u> </u><i><u>pm</u></i></span>\n</div>\n</div>\n</div>\n";
 
         assert_eq!(actual, expected);
     }

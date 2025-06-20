@@ -38,6 +38,7 @@ pub struct URLMessage<'a> {
     pub icons: Vec<&'a str>,
     /// The name of a website
     pub site_name: Option<&'a str>,
+    /// Indicates whether this is a placeholder link preview that needs to be loaded
     pub placeholder: bool,
 }
 

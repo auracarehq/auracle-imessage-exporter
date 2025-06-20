@@ -11,12 +11,19 @@ use std::{
 /// Errors that can happen when parsing `typedstream` data
 #[derive(Debug)]
 pub enum TypedStreamError {
+    /// Indicates an attempt to access data beyond the bounds of the buffer.
+    /// The first parameter is the attempted index, second is the buffer length
     OutOfBounds(usize, usize),
+    /// Indicates that the typedstream header is invalid or corrupted
     InvalidHeader,
+    /// Error that occurs when trying to convert a slice
     SliceError(TryFromSliceError),
+    /// Error that occurs when parsing a UTF-8 string
     StringParseError(Utf8Error),
+    /// Indicates that an array could not be properly parsed
     InvalidArray,
-    InvalidPointer(u8),
+    /// Indicates that a pointer could not be parsed, with the invalid byte value
+    InvalidPointer(usize),
 }
 
 impl Display for TypedStreamError {

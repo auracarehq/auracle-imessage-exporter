@@ -4,7 +4,10 @@
 
 use std::{fmt::Display, path::Path};
 
-use crate::{error::table::TableError, tables::table::DEFAULT_PATH_IOS};
+use crate::{
+    error::table::{TableConnectError, TableError},
+    tables::table::DEFAULT_PATH_IOS,
+};
 
 /// Represents the platform that created the database this library connects to
 #[derive(PartialEq, Eq, Debug)]
@@ -24,9 +27,7 @@ impl Platform {
         // the user accidentally passed the full iOS path,
         // not the root of the backup
         if db_path.ends_with(DEFAULT_PATH_IOS) {
-            return Err(TableError::CannotConnect(
-                "The path provided points to a database inside of an iOS backup, not the root of the backup.".to_string(),
-            ));
+            return Err(TableError::CannotConnect(TableConnectError::NotBackupRoot));
         }
 
         if db_path.join(DEFAULT_PATH_IOS).exists() {
