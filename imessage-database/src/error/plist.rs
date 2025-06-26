@@ -2,6 +2,8 @@
  Errors that can happen when parsing plist data.
 */
 
+use crabstep::error::TypedStreamError;
+
 use crate::error::handwriting::HandwritingError;
 use crate::error::streamtyped::StreamTypedError;
 use std::fmt::{Display, Formatter, Result};
@@ -27,6 +29,8 @@ pub enum PlistParseError {
     InvalidEditedMessage(String),
     /// Error from stream typed parsing
     StreamTypedError(StreamTypedError),
+    /// Error from typedstream parsing
+    TypedStreamError(TypedStreamError),
     /// Error from handwriting data parsing
     HandwritingError(HandwritingError),
     /// Error parsing Digital Touch message
@@ -63,6 +67,21 @@ impl Display for PlistParseError {
             PlistParseError::DigitalTouchError => {
                 write!(fmt, "Unable to parse Digital Touch Message!")
             }
+            PlistParseError::TypedStreamError(typed_stream_error) => {
+                write!(fmt, "TypedStream error: {typed_stream_error}")
+            }
         }
+    }
+}
+
+impl From<TypedStreamError> for PlistParseError {
+    fn from(error: TypedStreamError) -> Self {
+        PlistParseError::TypedStreamError(error)
+    }
+}
+
+impl From<StreamTypedError> for PlistParseError {
+    fn from(error: StreamTypedError) -> Self {
+        PlistParseError::StreamTypedError(error)
     }
 }

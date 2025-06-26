@@ -2,7 +2,7 @@
  This module represents common (but not all) columns in the `handle` table.
 */
 
-use rusqlite::{Connection, Error, Result, Row, Statement};
+use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 use std::collections::{BTreeSet, HashMap};
 
 use crate::{
@@ -31,8 +31,8 @@ impl Table for Handle {
         })
     }
 
-    fn get(db: &Connection) -> Result<Statement, TableError> {
-        Ok(db.prepare(&format!("SELECT * from {HANDLE}"))?)
+    fn get(db: &Connection) -> Result<CachedStatement, TableError> {
+        Ok(db.prepare_cached(&format!("SELECT * from {HANDLE}"))?)
     }
 
     fn extract(handle: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {

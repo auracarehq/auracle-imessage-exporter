@@ -41,7 +41,7 @@ use imessage_database::{
             Message,
             models::{AttachmentMeta, BubbleComponent, GroupAction, TextAttributes},
         },
-        table::{AttributedBody, FITNESS_RECEIVER, ME, ORPHANED, Table, YOU},
+        table::{FITNESS_RECEIVER, ME, ORPHANED, Table, YOU},
     },
     util::{
         dates::{TIMESTAMP_FACTOR, format, get_local_time, readable_diff},
@@ -189,7 +189,7 @@ impl<'a> Writer<'a> for TXT<'a> {
         }
 
         // Useful message metadata
-        let message_parts = message.body();
+        let message_parts = &message.components;
         let mut attachments = Attachment::from_message(self.config.db(), message)?;
         let mut replies = message.get_replies(self.config.db())?;
 
@@ -393,7 +393,7 @@ impl<'a> Writer<'a> for TXT<'a> {
         }
 
         // Append the transcription if one is provided
-        if let Some(transcription) = metadata.transcription {
+        if let Some(transcription) = &metadata.transcription {
             return Ok(format!(
                 "{}\nTranscription: {transcription}",
                 self.config.message_attachment_path(attachment)
@@ -1132,7 +1132,11 @@ mod tests {
         exporters::exporter::Writer,
     };
     use imessage_database::{
-        tables::{messages::models::AttachmentMeta, table::ME},
+        message_types::text_effects::TextEffect,
+        tables::{
+            messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
+            table::ME,
+        },
         util::platform::Platform,
     };
 
@@ -1225,6 +1229,7 @@ mod tests {
         message.text = Some("Hello world".to_string());
         message.is_from_me = true;
         message.chat_id = Some(0);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nHello world\n\n";
@@ -1245,6 +1250,7 @@ mod tests {
         message.date = 674526582885055488;
         message.is_from_me = true;
         message.deleted_from = Some(0);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nThis message was deleted from the conversation!\nHello world\n\n";
@@ -1266,6 +1272,7 @@ mod tests {
         // May 17, 2022  9:30:31 PM
         message.date_delivered = 674530231992568192;
         message.is_from_me = true;
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected =
@@ -1289,6 +1296,7 @@ mod tests {
         message.date = 674526582885055488;
         message.text = Some("Hello world".to_string());
         message.handle_id = Some(999999);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nSample Contact\nHello world\n\n";
@@ -1315,6 +1323,7 @@ mod tests {
         message.date_delivered = 674526582885055488;
         // May 17, 2022  9:30:31 PM
         message.date_read = 674530231992568192;
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM (Read by you after 1 hour, 49 seconds)\nSample Contact\nHello world\n\n";
@@ -1342,6 +1351,7 @@ mod tests {
         message.date_delivered = 674526582885055488;
         // May 17, 2022  9:30:31 PM
         message.date_read = 674530231992568192;
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM (Read by Name after 1 hour, 49 seconds)\nSample Contact\nHello world\n\n";
@@ -2033,8 +2043,8 @@ mod tests {
         attachment.filename = Some("Audio Message.caf".to_string());
         attachment.mime_type = None;
 
-        let meta = AttachmentMeta::<'_> {
-            transcription: Some("Test"),
+        let meta = AttachmentMeta {
+            transcription: Some("Test".to_string()),
             ..Default::default()
         };
 
@@ -2043,6 +2053,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual, "Audio Message.caf\nTranscription: Test");
+    }
+
+    #[test]
+    fn can_format_txt_single_url_no_bundle_id() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+
+        // Use test message payload from test database
+        // May 17, 2022  8:29:42 PM
+        message.guid = "FAKEGUID-D0C8-4212-AA87-DD8AE4FD1203".to_string();
+        message.rowid = 123445;
+
+        message.date = 674526582885055488;
+        // Set the message components to a single url
+        message.text = Some("https://example.com".to_string());
+        message.components = vec![BubbleComponent::Text(vec![
+                TextAttributes::new(
+                    0,
+                    84,
+                    vec![
+                        TextEffect::Link("https://www.ghacks.net/2020/01/23/lastpass-no-longer-listed-on-the-chrome-web-store/".to_string()),
+                    ]
+                ),
+            ]),];
+        let _ = message.generate_text(config.db());
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+
+        assert_eq!(
+            actual,
+            "May 17, 2022  5:29:42 PM\nUnknown\nhttps://www.ghacks.net/2020/01/23/lastpass-no-longer-listed-on-the-chrome-web-store/\nLastPass no longer listed on the Chrome Web Store - gHacks Tech News\nLastPass customers and new users searching for password managers on Google's Chrome Web Store may have noticed that the LastPass extension for Google Chrome is currently no longer listed on the store.\n\n"
+        );
     }
 }
 
@@ -2413,14 +2459,19 @@ mod balloon_format_tests {
 
 #[cfg(test)]
 mod text_effect_tests {
-    use crate::{Config, Exporter, Options, TXT, exporters::exporter::Writer};
-    use imessage_database::util::typedstream::parser::TypedStreamReader;
-    use std::{env::current_dir, fs::File, io::Read};
+    use imessage_database::{
+        message_types::text_effects::{Animation, Style, TextEffect, Unit},
+        tables::messages::models::{BubbleComponent, TextAttributes},
+    };
+
+    use crate::{
+        Config, Exporter, Options, TXT, app::export_type::ExportType, exporters::exporter::Writer,
+    };
 
     #[test]
     fn can_format_txt_text_styles_mixed_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2431,17 +2482,12 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/TextStylesMixed");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 9, vec![TextEffect::Styles(vec![Style::Underline])]),
+            TextAttributes::new(9, 17, vec![TextEffect::Default]),
+            TextAttributes::new(17, 23, vec![TextEffect::Animated(Animation::Jitter)]),
+            TextAttributes::new(23, 30, vec![TextEffect::Default]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nUnderline normal jitter normal\n\n";
@@ -2452,7 +2498,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_txt_text_styled_plain_link() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2464,17 +2510,16 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/StyledLink");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            61,
+            vec![
+                TextEffect::Animated(Animation::Big),
+                TextEffect::Link(
+                    "https://github.com/ReagentX/imessage-exporter/discussions/553".to_string(),
+                ),
+            ],
+        )])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nhttps://github.com/ReagentX/imessage-exporter/discussions/553\n\n";
@@ -2485,7 +2530,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_txt_text_styled_emoji_bold_underline() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2496,17 +2541,12 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/EmojiBoldUnderline");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 7, vec![TextEffect::Default]),
+            TextAttributes::new(7, 11, vec![TextEffect::Styles(vec![Style::Bold])]),
+            TextAttributes::new(11, 12, vec![TextEffect::Default]),
+            TextAttributes::new(12, 21, vec![TextEffect::Styles(vec![Style::Underline])]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\n🅱️Bold_Underline\n\n";
@@ -2517,7 +2557,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styled_overlapping_ranges() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2528,17 +2568,34 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/OverlappingFormat");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(
+                0,
+                1,
+                vec![
+                    TextEffect::Conversion(Unit::Timezone),
+                    TextEffect::Styles(vec![Style::Bold]),
+                ],
+            ),
+            TextAttributes::new(1, 2, vec![TextEffect::Conversion(Unit::Timezone)]),
+            TextAttributes::new(
+                2,
+                4,
+                vec![
+                    TextEffect::Conversion(Unit::Timezone),
+                    TextEffect::Styles(vec![Style::Underline]),
+                ],
+            ),
+            TextAttributes::new(4, 5, vec![TextEffect::Conversion(Unit::Timezone)]),
+            TextAttributes::new(
+                5,
+                7,
+                vec![
+                    TextEffect::Conversion(Unit::Timezone),
+                    TextEffect::Styles(vec![Style::Italic]),
+                ],
+            ),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\n8:00 pm\n\n";
@@ -2549,13 +2606,15 @@ mod text_effect_tests {
 
 #[cfg(test)]
 mod edited_tests {
-    use std::{env::current_dir, fs::File, io::Read};
+    use imessage_database::{
+        message_types::{
+            edited::{EditStatus, EditedMessage, EditedMessagePart},
+            text_effects::TextEffect,
+        },
+        tables::messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
+    };
 
     use crate::{Config, Exporter, Options, TXT, exporters::exporter::Writer};
-    use imessage_database::{
-        message_types::edited::{EditStatus, EditedMessage, EditedMessagePart},
-        util::typedstream::parser::TypedStreamReader,
-    };
 
     #[test]
     fn can_format_txt_conversion_final_unsent() {
@@ -2594,17 +2653,18 @@ mod edited_tests {
             ],
         });
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/MultiPartWithDeleted");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![
+            BubbleComponent::Text(vec![TextAttributes::new(0, 28, vec![TextEffect::Default])]),
+            BubbleComponent::Attachment(AttachmentMeta {
+                guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
+                transcription: None,
+                height: None,
+                width: None,
+                name: None,
+            }),
+            BubbleComponent::Text(vec![TextAttributes::new(31, 63, vec![TextEffect::Default])]),
+            BubbleComponent::Retracted,
+        ];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nFrom arbitrary byte stream:\r\nAttachment missing!\nTo native Rust data structures:\r\nYou unsent this message part 1 hour, 49 seconds after sending!\n\n";
@@ -2628,17 +2688,18 @@ mod edited_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/MultiPartWithDeleted");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![
+            BubbleComponent::Text(vec![TextAttributes::new(0, 28, vec![TextEffect::Default])]),
+            BubbleComponent::Attachment(AttachmentMeta {
+                guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
+                transcription: None,
+                height: None,
+                width: None,
+                name: None,
+            }),
+            BubbleComponent::Text(vec![TextAttributes::new(31, 63, vec![TextEffect::Default])]),
+            BubbleComponent::Retracted,
+        ];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nFrom arbitrary byte stream:\r\nAttachment missing!\nTo native Rust data structures:\r\n\n";
@@ -2667,17 +2728,7 @@ mod edited_tests {
             }],
         });
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/Blank");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Retracted];
 
         let actual = exporter.format_announcement(&message);
         let expected = "May 17, 2022  5:29:42 PM You unsent a message!\n\n";

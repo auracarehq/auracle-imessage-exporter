@@ -48,7 +48,7 @@ use imessage_database::{
             Message,
             models::{AttachmentMeta, BubbleComponent, GroupAction, TextAttributes},
         },
-        table::{AttributedBody, FITNESS_RECEIVER, ME, ORPHANED, Table, YOU},
+        table::{FITNESS_RECEIVER, ME, ORPHANED, Table, YOU},
     },
     util::{
         dates::{TIMESTAMP_FACTOR, format, get_local_time, readable_diff},
@@ -65,7 +65,7 @@ const STYLE: &str = include_str!("resources/style.css");
 /// so we can render them correctly in the HTML output.
 enum EventType<'a> {
     /// Start event for text attributes, contains the index of the text part
-    Start(usize, &'a TextAttributes<'a>),
+    Start(usize, &'a [TextEffect]),
     /// End event for text attributes, contains the index of the text part
     End(usize),
 }
@@ -294,7 +294,7 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
 
         // Useful message metadata
-        let message_parts = message.body();
+        let message_parts = &message.components;
         let mut attachments = Attachment::from_message(self.config.db(), message)?;
         let mut replies = message.get_replies(self.config.db())?;
 
@@ -595,7 +595,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                 )
             }
             MediaType::Audio(media_type) => {
-                if let Some(transcription) = metadata.transcription {
+                if let Some(transcription) = &metadata.transcription {
                     return Ok(format!(
                         "<div><audio controls src=\"{embed_path}\" type=\"{media_type}\" </audio></div> <hr><span class=\"transcription\">Transcription: {transcription}</span>"
                     ));
@@ -937,7 +937,7 @@ impl<'a> Writer<'a> for HTML<'a> {
                         let last = idx == edited_message_part.edit_history.len() - 1;
                         if let Some(text) = &event.text {
                             let clean_text = if let Some(BubbleComponent::Text(attributes)) =
-                                event.body().first()
+                                event.components.first()
                             {
                                 Cow::Owned(self.format_attributes(text, attributes))
                             } else {
@@ -1009,7 +1009,7 @@ impl<'a> Writer<'a> for HTML<'a> {
 
         // Create events for each attribute, marking start and end positions. The ID is the index of the attribute in the list.
         for (attr_id, attr) in attributes.iter().enumerate() {
-            events.push((attr.start, EventType::Start(attr_id, attr)));
+            events.push((attr.start, EventType::Start(attr_id, &attr.effects)));
             events.push((attr.end, EventType::End(attr_id)));
         }
 
@@ -1024,7 +1024,7 @@ impl<'a> Writer<'a> for HTML<'a> {
 
         let mut result = String::new();
         // The currently active attributes, stored as (attribute ID, TextAttributes)
-        let mut active_attrs: Vec<(usize, &TextAttributes)> = Vec::new();
+        let mut active_attrs = Vec::new();
         let mut last_pos = events.first().map_or(0, |(pos, _)| *pos);
 
         for (pos, event) in events {
@@ -1659,7 +1659,7 @@ impl HTML<'_> {
     fn apply_active_attributes<'a>(
         &'a self,
         text: &'a str,
-        active_attrs: &'a [(usize, &TextAttributes)],
+        active_attrs: &'a [(usize, &[TextEffect])],
     ) -> Cow<'a, str> {
         // If there are no active attributes, return the original text
         if active_attrs.is_empty() {
@@ -1672,13 +1672,15 @@ impl HTML<'_> {
         // Iterate through the active attributes and apply their effects
         // If we encounter a TextEffect that modifies the text, we will convert it to an owned type
         // to ensure we can modify it.
-        for (_, attr) in active_attrs {
-            // If the effect is `Default`, we can skip it, because it does not modify the text
-            if !matches!(attr.effect, TextEffect::Default) {
-                // Once we need to modify, convert to owned and stay owned
-                let owned_text = result.into_owned();
-                let formatted = self.format_effect(&owned_text, &attr.effect);
-                result = Cow::Owned(formatted.into_owned());
+        for (_, effects) in active_attrs {
+            for effect in *effects {
+                // If the effect is `Default`, we can skip it, because it does not modify the text
+                if !matches!(effect, TextEffect::Default) {
+                    // Once we need to modify, convert to owned and stay owned
+                    let owned_text = result.into_owned();
+                    let formatted = self.format_effect(&owned_text, effect);
+                    result = Cow::Owned(formatted.into_owned());
+                }
             }
         }
 
@@ -1797,7 +1799,11 @@ mod tests {
         exporters::exporter::Writer,
     };
     use imessage_database::{
-        tables::{messages::models::AttachmentMeta, table::ME},
+        message_types::text_effects::TextEffect,
+        tables::{
+            messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
+            table::ME,
+        },
         util::platform::Platform,
     };
 
@@ -1911,6 +1917,7 @@ mod tests {
         message.text = Some("Hello world".to_string());
         message.is_from_me = true;
         message.chat_id = Some(0);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
@@ -1931,6 +1938,7 @@ mod tests {
         message.text = Some("<table></table>".to_string());
         message.is_from_me = true;
         message.chat_id = Some(0);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">&lt;table&gt;&lt;/table&gt;</span>\n</div>\n</div>\n</div>\n";
@@ -1951,6 +1959,7 @@ mod tests {
         message.date = 674526582885055488;
         message.is_from_me = true;
         message.deleted_from = Some(0);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<span class=\"deleted\">This message was deleted from the conversation!</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
@@ -1972,6 +1981,7 @@ mod tests {
         // May 17, 2022  9:30:31 PM
         message.date_delivered = 674530231992568192;
         message.is_from_me = true;
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> (Read by them after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
@@ -1994,6 +2004,7 @@ mod tests {
         message.date = 674526582885055488;
         message.text = Some("Hello world".to_string());
         message.handle_id = Some(999999);
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
@@ -2020,6 +2031,7 @@ mod tests {
         message.date_delivered = 674526582885055488;
         // May 17, 2022  9:30:31 PM
         message.date_read = 674530231992568192;
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> (Read by you after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
@@ -2047,6 +2059,7 @@ mod tests {
         message.date_delivered = 674526582885055488;
         // May 17, 2022  9:30:31 PM
         message.date_read = 674530231992568192;
+        message.generate_text_legacy(config.db()).unwrap();
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> (Read by Name after 1 hour, 49 seconds)</span>\n<span class=\"sender\">Sample Contact</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hello world</span>\n</div>\n</div>\n</div>\n";
@@ -2780,8 +2793,8 @@ mod tests {
         attachment.filename = Some("Audio Message.caf".to_string());
         attachment.mime_type = None;
 
-        let meta = AttachmentMeta::<'_> {
-            transcription: Some("Test"),
+        let meta = AttachmentMeta {
+            transcription: Some("Test".to_string()),
             ..Default::default()
         };
 
@@ -2792,6 +2805,41 @@ mod tests {
         assert_eq!(
             actual,
             "<div><audio controls src=\"Audio Message.caf\" type=\"x-caf; codecs=opus\" </audio></div> <hr><span class=\"transcription\">Transcription: Test</span>"
+        );
+    }
+
+    #[test]
+    fn can_format_html_single_url_no_bundle_id() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+
+        // Use test message payload from test database
+        message.guid = "FAKEGUID-D0C8-4212-AA87-DD8AE4FD1203".to_string();
+        message.rowid = 123445;
+
+        message.date = 674526582885055488;
+        // Set the message components to a single url
+        message.text = Some("https://example.com".to_string());
+        message.components = vec![BubbleComponent::Text(vec![
+                TextAttributes::new(
+                    0,
+                    84,
+                    vec![
+                        TextEffect::Link("https://www.ghacks.net/2020/01/23/lastpass-no-longer-listed-on-the-chrome-web-store/".to_string()),
+                    ]
+                ),
+            ]),];
+        let _ = message.generate_text(config.db());
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+
+        assert_eq!(
+            actual,
+            "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=FAKEGUID-D0C8-4212-AA87-DD8AE4FD1203\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Unknown</span></p>\n<hr><div class=\"message_part\">\n<div class=\"app\"><a href=\"https://www.ghacks.net/2020/01/23/lastpass-no-longer-listed-on-the-chrome-web-store/\"><div class=\"app_header\"><img src=\"https://www.ghacks.net/wp-content/uploads/2020/01/lastpass-chrome-extension.png\" loading=\"lazy\", onerror=\"this.style.display='none'\"><div class=\"name\">gHacks Technology News</div></div><div class=\"app_footer\"><div class=\"caption\">LastPass no longer listed on the Chrome Web Store - gHacks Tech News</div><div class=\"subcaption\">LastPass customers and new users searching for password managers on Google&apos;s Chrome Web Store may have noticed that the LastPass extension for Google Chrome is currently no longer listed on the store.</div></div></a></div>\n</div>\n</div>\n</div>\n"
         );
     }
 }
@@ -3196,15 +3244,15 @@ mod balloon_format_tests {
 
 #[cfg(test)]
 mod text_effect_tests {
+    use imessage_database::{
+        message_types::text_effects::{Animation, Style, TextEffect, Unit},
+        tables::messages::models::{BubbleComponent, TextAttributes},
+    };
+
     use crate::{
         Config, Exporter, HTML, Options,
         exporters::exporter::{TextEffectFormatter, Writer},
     };
-    use imessage_database::{
-        message_types::text_effects::{Style, TextEffect, Unit},
-        util::typedstream::parser::TypedStreamReader,
-    };
-    use std::{env::current_dir, fs::File, io::Read};
 
     #[test]
     fn can_format_html_default() {
@@ -3332,17 +3380,11 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/Mention");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 5, vec![TextEffect::Default]),
+            TextAttributes::new(5, 8, vec![TextEffect::Mention("+15558675309".to_string())]),
+            TextAttributes::new(8, 9, vec![TextEffect::Default]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Test <span title=\"+15558675309\"><b>Dad</b></span> </span>\n</div>\n</div>\n</div>\n";
@@ -3364,17 +3406,10 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/Code");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 6, vec![TextEffect::OTP]),
+            TextAttributes::new(6, 52, vec![TextEffect::Default]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>000123</u> is your security code. Don&apos;t share your code.</span>\n</div>\n</div>\n</div>\n";
@@ -3396,17 +3431,13 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/URLMessage");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            56,
+            vec![TextEffect::Link(
+                "https://twitter.com/xxxxxxxxx/status/0000223300009216128".to_string(),
+            )],
+        )])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><a href=\"https://twitter.com/xxxxxxxxx/status/0000223300009216128\">https://twitter.com/xxxxxxxxx/status/0000223300009216128</a></span>\n</div>\n</div>\n</div>\n";
@@ -3428,17 +3459,11 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/Date");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 17, vec![TextEffect::Default]),
+            TextAttributes::new(17, 25, vec![TextEffect::Conversion(Unit::Timezone)]),
+            TextAttributes::new(25, 26, vec![TextEffect::Default]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Hi. Right now or <u>tomorrow</u>?</span>\n</div>\n</div>\n</div>\n";
@@ -3460,17 +3485,21 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/TextEffects");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 3, vec![TextEffect::Animated(Animation::Big)]),
+            TextAttributes::new(3, 4, vec![TextEffect::Default]),
+            TextAttributes::new(4, 10, vec![TextEffect::Animated(Animation::Small)]),
+            TextAttributes::new(10, 15, vec![TextEffect::Animated(Animation::Shake)]),
+            TextAttributes::new(15, 16, vec![TextEffect::Animated(Animation::Small)]),
+            TextAttributes::new(16, 19, vec![TextEffect::Animated(Animation::Nod)]),
+            TextAttributes::new(19, 20, vec![TextEffect::Animated(Animation::Small)]),
+            TextAttributes::new(20, 28, vec![TextEffect::Animated(Animation::Explode)]),
+            TextAttributes::new(28, 34, vec![TextEffect::Animated(Animation::Ripple)]),
+            TextAttributes::new(34, 35, vec![TextEffect::Animated(Animation::Explode)]),
+            TextAttributes::new(35, 40, vec![TextEffect::Animated(Animation::Bloom)]),
+            TextAttributes::new(40, 41, vec![TextEffect::Animated(Animation::Explode)]),
+            TextAttributes::new(41, 47, vec![TextEffect::Animated(Animation::Jitter)]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><span class=\"animationBig\">Big</span> <span class=\"animationSmall\">small </span><span class=\"animationShake\">shake</span><span class=\"animationSmall\"> </span><span class=\"animationNod\">nod</span><span class=\"animationSmall\"> </span><span class=\"animationExplode\">explode </span><span class=\"animationRipple\">ripple</span><span class=\"animationExplode\"> </span><span class=\"animationBloom\">bloom</span><span class=\"animationExplode\"> </span><span class=\"animationJitter\">jitter</span></span>\n</div>\n</div>\n</div>\n";
@@ -3492,17 +3521,26 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/TextStyles");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 4, vec![TextEffect::Styles(vec![Style::Bold])]),
+            TextAttributes::new(4, 5, vec![TextEffect::Default]),
+            TextAttributes::new(5, 14, vec![TextEffect::Styles(vec![Style::Underline])]),
+            TextAttributes::new(14, 15, vec![TextEffect::Default]),
+            TextAttributes::new(15, 21, vec![TextEffect::Styles(vec![Style::Italic])]),
+            TextAttributes::new(21, 22, vec![TextEffect::Default]),
+            TextAttributes::new(22, 35, vec![TextEffect::Styles(vec![Style::Strikethrough])]),
+            TextAttributes::new(35, 40, vec![TextEffect::Default]),
+            TextAttributes::new(
+                40,
+                44,
+                vec![TextEffect::Styles(vec![
+                    Style::Bold,
+                    Style::Strikethrough,
+                    Style::Underline,
+                    Style::Italic,
+                ])],
+            ),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><b>Bold</b> <u>underline</u> <i>italic</i> <s>strikethrough</s> all <i><u><s><b>four</b></s></u></i></span>\n</div>\n</div>\n</div>\n";
@@ -3524,17 +3562,16 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/TextStylesSingleRange");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            10,
+            vec![TextEffect::Styles(vec![
+                Style::Bold,
+                Style::Strikethrough,
+                Style::Underline,
+                Style::Italic,
+            ])],
+        )])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><i><u><s><b>Everything</b></s></u></i></span>\n</div>\n</div>\n</div>\n";
@@ -3556,17 +3593,12 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/TextStylesMixed");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 9, vec![TextEffect::Styles(vec![Style::Underline])]),
+            TextAttributes::new(9, 17, vec![TextEffect::Default]),
+            TextAttributes::new(17, 23, vec![TextEffect::Animated(Animation::Jitter)]),
+            TextAttributes::new(23, 30, vec![TextEffect::Default]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><u>Underline</u> normal <span class=\"animationJitter\">jitter</span> normal</span>\n</div>\n</div>\n</div>\n";
@@ -3589,17 +3621,16 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/StyledLink");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            61,
+            vec![
+                TextEffect::Animated(Animation::Big),
+                TextEffect::Link(
+                    "https://github.com/ReagentX/imessage-exporter/discussions/553".to_string(),
+                ),
+            ],
+        )])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><a href=\"https://github.com/ReagentX/imessage-exporter/discussions/553\"><span class=\"animationBig\">https://github.com/ReagentX/imessage-exporter/discussions/553</span></a></span>\n</div>\n</div>\n</div>\n";
@@ -3621,17 +3652,12 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/EmojiBoldUnderline");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(0, 7, vec![TextEffect::Default]),
+            TextAttributes::new(7, 11, vec![TextEffect::Styles(vec![Style::Bold])]),
+            TextAttributes::new(11, 12, vec![TextEffect::Default]),
+            TextAttributes::new(12, 21, vec![TextEffect::Styles(vec![Style::Underline])]),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">🅱\u{fe0f}<b>Bold</b>_<u>Underline</u></span>\n</div>\n</div>\n</div>\n";
@@ -3653,17 +3679,34 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/OverlappingFormat");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![
+            TextAttributes::new(
+                0,
+                1,
+                vec![
+                    TextEffect::Conversion(Unit::Timezone),
+                    TextEffect::Styles(vec![Style::Bold]),
+                ],
+            ),
+            TextAttributes::new(1, 2, vec![TextEffect::Conversion(Unit::Timezone)]),
+            TextAttributes::new(
+                2,
+                4,
+                vec![
+                    TextEffect::Conversion(Unit::Timezone),
+                    TextEffect::Styles(vec![Style::Underline]),
+                ],
+            ),
+            TextAttributes::new(4, 5, vec![TextEffect::Conversion(Unit::Timezone)]),
+            TextAttributes::new(
+                5,
+                7,
+                vec![
+                    TextEffect::Conversion(Unit::Timezone),
+                    TextEffect::Styles(vec![Style::Italic]),
+                ],
+            ),
+        ])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\"><b><u>8</u></b><u>:</u><u><u>00</u></u><u> </u><i><u>pm</u></i></span>\n</div>\n</div>\n</div>\n";
@@ -3678,11 +3721,11 @@ mod edited_tests {
 
     use crate::{Config, Exporter, HTML, Options, exporters::exporter::Writer};
     use imessage_database::{
-        message_types::edited::{EditStatus, EditedEvent, EditedMessage, EditedMessagePart},
-        util::typedstream::{
-            models::{Archivable, Class, OutputData},
-            parser::TypedStreamReader,
+        message_types::{
+            edited::{EditStatus, EditedEvent, EditedMessage, EditedMessagePart},
+            text_effects::{Style, TextEffect},
         },
+        tables::messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
     };
 
     #[test]
@@ -3700,99 +3743,21 @@ mod edited_tests {
                     EditedEvent {
                         date: 758573156000000000,
                         text: Some("Test".to_string()),
-                        components: Some(vec![
-                            Archivable::Object(
-                                Class {
-                                    name: "NSString".to_string(),
-                                    version: 1,
-                                },
-                                vec![OutputData::String("Test".to_string())],
-                            ),
-                            Archivable::Data(vec![
-                                OutputData::SignedInteger(1),
-                                OutputData::UnsignedInteger(4),
-                            ]),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSDictionary".to_string(),
-                                    version: 0,
-                                },
-                                vec![OutputData::SignedInteger(1)],
-                            ),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSString".to_string(),
-                                    version: 1,
-                                },
-                                vec![OutputData::String(
-                                    "__kIMMessagePartAttributeName".to_string(),
-                                )],
-                            ),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSNumber".to_string(),
-                                    version: 0,
-                                },
-                                vec![OutputData::SignedInteger(0)],
-                            ),
-                        ]),
+                        components: vec![BubbleComponent::Text(vec![TextAttributes {
+                            start: 0,
+                            end: 4,
+                            effects: vec![TextEffect::Default],
+                        }])],
                         guid: None,
                     },
                     EditedEvent {
                         date: 758573166000000000,
                         text: Some("Test".to_string()),
-                        components: Some(vec![
-                            Archivable::Object(
-                                Class {
-                                    name: "NSString".to_string(),
-                                    version: 1,
-                                },
-                                vec![OutputData::String("Test".to_string())],
-                            ),
-                            Archivable::Data(vec![
-                                OutputData::SignedInteger(1),
-                                OutputData::UnsignedInteger(4),
-                            ]),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSDictionary".to_string(),
-                                    version: 0,
-                                },
-                                vec![OutputData::SignedInteger(2)],
-                            ),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSString".to_string(),
-                                    version: 1,
-                                },
-                                vec![OutputData::String(
-                                    "__kIMTextStrikethroughAttributeName".to_string(),
-                                )],
-                            ),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSNumber".to_string(),
-                                    version: 0,
-                                },
-                                vec![OutputData::SignedInteger(1)],
-                            ),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSString".to_string(),
-                                    version: 1,
-                                },
-                                vec![OutputData::String(
-                                    "__kIMMessagePartAttributeName".to_string(),
-                                )],
-                            ),
-                            Archivable::Object(
-                                Class {
-                                    name: "NSNumber".to_string(),
-                                    version: 0,
-                                },
-                                vec![OutputData::SignedInteger(0)],
-                            ),
-                        ]),
+                        components: vec![BubbleComponent::Text(vec![TextAttributes {
+                            start: 0,
+                            end: 4,
+                            effects: vec![TextEffect::Styles(vec![Style::Strikethrough])],
+                        }])],
                         guid: Some("76A466B8-D21E-4A20-AF62-FF2D3A20D31C".to_string()),
                     },
                 ],
@@ -3817,8 +3782,11 @@ mod edited_tests {
         let mut bytes = vec![];
         file.read_to_end(&mut bytes).unwrap();
 
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+            0,
+            4,
+            vec![TextEffect::Styles(vec![Style::Strikethrough])],
+        )])];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<div class=\"edited\"><table><tbody><tr><td><span class=\"timestamp\"></span></td><td>Test</td></tr></tbody><tfoot><tr><td><span class=\"timestamp\">Edited 10 seconds later</span></td><td><s>Test</s></td></tr></tfoot></table></div>\n</div>\n</div>\n</div>\n";
@@ -3863,17 +3831,18 @@ mod edited_tests {
             ],
         });
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/MultiPartWithDeleted");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![
+            BubbleComponent::Text(vec![TextAttributes::new(0, 28, vec![TextEffect::Default])]),
+            BubbleComponent::Attachment(AttachmentMeta {
+                guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
+                transcription: None,
+                height: None,
+                width: None,
+                name: None,
+            }),
+            BubbleComponent::Text(vec![TextAttributes::new(31, 63, vec![TextEffect::Default])]),
+            BubbleComponent::Retracted,
+        ];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">From arbitrary byte stream:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"attachment_error\">Attachment does not exist!</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">To native Rust data structures:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"unsent\"><span class=\"unsent\">You unsent this message part 1 hour, 49 seconds after sending!</span></span>\n</div>\n</div>\n</div>\n";
@@ -3897,17 +3866,17 @@ mod edited_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/MultiPartWithDeleted");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![
+            BubbleComponent::Text(vec![TextAttributes::new(0, 28, vec![TextEffect::Default])]),
+            BubbleComponent::Attachment(AttachmentMeta {
+                guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
+                transcription: None,
+                height: None,
+                width: None,
+                name: None,
+            }),
+            BubbleComponent::Text(vec![TextAttributes::new(31, 63, vec![TextEffect::Default])]),
+        ];
 
         let actual = exporter.format_message(&message, 0).unwrap();
         let expected = "<div class=\"message\">\n<div class=\"sent iMessage\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Me</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">From arbitrary byte stream:\r</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"attachment_error\">Attachment does not exist!</span>\n</div>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">To native Rust data structures:\r</span>\n</div>\n</div>\n</div>\n";
@@ -3936,17 +3905,7 @@ mod edited_tests {
             }],
         });
 
-        let typedstream_path = current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("imessage-database/test_data/typedstream/Blank");
-        let mut file = File::open(typedstream_path).unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-
-        let mut parser = TypedStreamReader::from(&bytes);
-        message.components = parser.parse().ok();
+        message.components = vec![];
 
         let actual = exporter.format_announcement(&message);
         let expected = "<div class =\"announcement\"><p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span> You unsent a message.</p></div>";

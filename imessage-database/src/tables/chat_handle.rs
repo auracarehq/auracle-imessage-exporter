@@ -11,7 +11,7 @@ use crate::{
     },
     util::output::{done_processing, processing},
 };
-use rusqlite::{Connection, Error, Result, Row, Statement};
+use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 
 /// Represents a single row in the `chat_handle_join` table.
 pub struct ChatToHandle {
@@ -27,8 +27,8 @@ impl Table for ChatToHandle {
         })
     }
 
-    fn get(db: &Connection) -> Result<Statement, TableError> {
-        Ok(db.prepare(&format!("SELECT * FROM {CHAT_HANDLE_JOIN}"))?)
+    fn get(db: &Connection) -> Result<CachedStatement, TableError> {
+        Ok(db.prepare_cached(&format!("SELECT * FROM {CHAT_HANDLE_JOIN}"))?)
     }
 
     fn extract(chat_to_handle: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {

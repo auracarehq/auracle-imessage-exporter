@@ -118,26 +118,28 @@
 use std::{collections::HashMap, io::Read};
 
 use chrono::{DateTime, offset::Local};
+use crabstep::TypedStreamDeserializer;
 use plist::Value;
-use rusqlite::{Connection, Error, Result, Row, Statement, blob::Blob};
+use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 
 use crate::{
     error::{message::MessageError, table::TableError},
     message_types::{
         edited::{EditStatus, EditedMessage},
         expressives::{BubbleEffect, Expressive, ScreenEffect},
+        text_effects::TextEffect,
         variants::{Announcement, BalloonProvider, CustomBalloon, Tapback, TapbackAction, Variant},
     },
     tables::{
         messages::{
             body::{parse_body_legacy, parse_body_typedstream},
-            models::{BubbleComponent, GroupAction, Service},
+            models::{BubbleComponent, GroupAction, Service, TextAttributes},
             query_parts::{ios_13_older_query, ios_14_15_query, ios_16_newer_query},
         },
         table::{
-            ATTRIBUTED_BODY, AttributedBody, CHAT_MESSAGE_JOIN, Cacheable, Diagnostic, GetBlob,
-            MESSAGE, MESSAGE_ATTACHMENT_JOIN, MESSAGE_PAYLOAD, MESSAGE_SUMMARY_INFO,
-            RECENTLY_DELETED, Table,
+            ATTRIBUTED_BODY, CHAT_MESSAGE_JOIN, Cacheable, Diagnostic, MESSAGE,
+            MESSAGE_ATTACHMENT_JOIN, MESSAGE_PAYLOAD, MESSAGE_SUMMARY_INFO, RECENTLY_DELETED,
+            Table,
         },
     },
     util::{
@@ -146,7 +148,6 @@ use crate::{
         output::{done_processing, processing},
         query_context::QueryContext,
         streamtyped,
-        typedstream::{models::Archivable, parser::TypedStreamReader},
     },
 };
 
@@ -197,7 +198,7 @@ pub struct Message {
     pub group_action_type: i32,
     /// The message GUID of a message associated with this one
     pub associated_message_guid: Option<String>,
-    /// Intermediate data for determining the [`Variant`] of a message
+    /// The numeric type code for the associated message, used to determine message variant
     pub associated_message_type: Option<i32>,
     /// The [bundle ID](https://developer.apple.com/help/app-store-connect/reference/app-bundle-information) of the app that generated the [`AppMessage`](crate::message_types::app::AppMessage)
     pub balloon_bundle_id: Option<String>,
@@ -219,8 +220,8 @@ pub struct Message {
     pub deleted_from: Option<i32>,
     /// The number of replies to the message
     pub num_replies: i32,
-    /// The components of the message body, parsed by [`TypedStreamReader`]
-    pub components: Option<Vec<Archivable>>,
+    /// The components of the message body, parsed by a [`TypedStreamDeserializer`] or [`streamtyped::parse()`]
+    pub components: Vec<BubbleComponent>,
     /// The components of the message that may or may not have been edited or unsent
     pub edited_parts: Option<EditedMessage>,
 }
@@ -228,48 +229,49 @@ pub struct Message {
 impl Table for Message {
     fn from_row(row: &Row) -> Result<Message> {
         Ok(Message {
-            rowid: row.get("rowid")?,
-            guid: row.get("guid")?,
-            text: row.get("text").unwrap_or(None),
-            service: row.get("service").unwrap_or(None),
-            handle_id: row.get("handle_id").unwrap_or(None),
-            destination_caller_id: row.get("destination_caller_id").unwrap_or(None),
-            subject: row.get("subject").unwrap_or(None),
-            date: row.get("date")?,
-            date_read: row.get("date_read").unwrap_or(0),
-            date_delivered: row.get("date_delivered").unwrap_or(0),
-            is_from_me: row.get("is_from_me")?,
-            is_read: row.get("is_read").unwrap_or(false),
-            item_type: row.get("item_type").unwrap_or_default(),
-            other_handle: row.get("other_handle").unwrap_or(None),
-            share_status: row.get("share_status").unwrap_or(false),
-            share_direction: row.get("share_direction").unwrap_or(None),
-            group_title: row.get("group_title").unwrap_or(None),
-            group_action_type: row.get("group_action_type").unwrap_or(0),
-            associated_message_guid: row.get("associated_message_guid").unwrap_or(None),
-            associated_message_type: row.get("associated_message_type").unwrap_or(None),
-            balloon_bundle_id: row.get("balloon_bundle_id").unwrap_or(None),
-            expressive_send_style_id: row.get("expressive_send_style_id").unwrap_or(None),
-            thread_originator_guid: row.get("thread_originator_guid").unwrap_or(None),
-            thread_originator_part: row.get("thread_originator_part").unwrap_or(None),
-            date_edited: row.get("date_edited").unwrap_or(0),
-            associated_message_emoji: row.get("associated_message_emoji").unwrap_or(None),
-            chat_id: row.get("chat_id").unwrap_or(None),
-            num_attachments: row.get("num_attachments")?,
-            deleted_from: row.get("deleted_from").unwrap_or(None),
-            num_replies: row.get("num_replies")?,
-            components: None,
+            // positional column lookups
+            rowid: row.get(0)?,
+            guid: row.get(1)?,
+            text: row.get(2).unwrap_or(None),
+            service: row.get(3).unwrap_or(None),
+            handle_id: row.get(4).unwrap_or(None),
+            destination_caller_id: row.get(5).unwrap_or(None),
+            subject: row.get(6).unwrap_or(None),
+            date: row.get(7)?,
+            date_read: row.get(8).unwrap_or(0),
+            date_delivered: row.get(9).unwrap_or(0),
+            is_from_me: row.get(10)?,
+            is_read: row.get(11).unwrap_or(false),
+            item_type: row.get(12).unwrap_or_default(),
+            other_handle: row.get(13).unwrap_or(None),
+            share_status: row.get(14).unwrap_or(false),
+            share_direction: row.get(15).unwrap_or(None),
+            group_title: row.get(16).unwrap_or(None),
+            group_action_type: row.get(17).unwrap_or(0),
+            associated_message_guid: row.get(18).unwrap_or(None),
+            associated_message_type: row.get(19).unwrap_or(None),
+            balloon_bundle_id: row.get(20).unwrap_or(None),
+            expressive_send_style_id: row.get(21).unwrap_or(None),
+            thread_originator_guid: row.get(22).unwrap_or(None),
+            thread_originator_part: row.get(23).unwrap_or(None),
+            date_edited: row.get(24).unwrap_or(0),
+            associated_message_emoji: row.get(25).unwrap_or(None),
+            chat_id: row.get(26).unwrap_or(None),
+            num_attachments: row.get(27)?,
+            deleted_from: row.get(28).unwrap_or(None),
+            num_replies: row.get(29)?,
+            components: vec![],
             edited_parts: None,
         })
     }
 
     /// Convert data from the messages table to native Rust data structures, falling back to
     /// more compatible queries to ensure compatibility with older database schemas
-    fn get(db: &Connection) -> Result<Statement, TableError> {
+    fn get(db: &Connection) -> Result<CachedStatement, TableError> {
         Ok(db
-            .prepare(&ios_16_newer_query(None))
-            .or_else(|_| db.prepare(&ios_14_15_query(None)))
-            .or_else(|_| db.prepare(&ios_13_older_query(None)))?)
+            .prepare_cached(&ios_16_newer_query(None))
+            .or_else(|_| db.prepare_cached(&ios_14_15_query(None)))
+            .or_else(|_| db.prepare_cached(&ios_13_older_query(None)))?)
     }
 
     fn extract(message: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
@@ -283,7 +285,7 @@ impl Table for Message {
 impl Diagnostic for Message {
     /// Emit diagnostic data for the Messages table
     ///
-    /// # Example:
+    /// # Example
     ///
     /// ```
     /// use imessage_database::util::dirs::default_db_path;
@@ -431,66 +433,9 @@ impl Cacheable for Message {
     }
 }
 
-impl GetBlob for Message {
-    /// Extract a blob of data that belongs to a single message from a given column
-    fn get_blob<'a>(&self, db: &'a Connection, column: &str) -> Option<Blob<'a>> {
-        db.blob_open(
-            rusqlite::MAIN_DB,
-            MESSAGE,
-            column,
-            i64::from(self.rowid),
-            true,
-        )
-        .ok()
-    }
-}
-
-impl AttributedBody for Message {
-    /// Get a vector of a message body's components. If the text has not been captured with [`Self::generate_text()`], the vector will be empty.
-    ///
-    /// For more detail see the trait documentation [here](crate::tables::table::AttributedBody).
-    fn body(&self) -> Vec<BubbleComponent> {
-        // If the message is an app, it will be rendered differently, so just escape there
-        if self.balloon_bundle_id.is_some() {
-            return vec![BubbleComponent::App];
-        }
-
-        if let Some(body) = parse_body_typedstream(
-            self.components.as_ref(),
-            self.text.as_deref(),
-            self.edited_parts.as_ref(),
-        ) {
-            return body;
-        }
-
-        // Naive logic for when `typedstream` component parsing fails
-        parse_body_legacy(&self.text)
-    }
-}
-
 impl Message {
     /// Generate the text of a message, deserializing it as [`typedstream`](crate::util::typedstream) (and falling back to [`streamtyped`]) data if necessary.
     pub fn generate_text<'a>(&'a mut self, db: &'a Connection) -> Result<&'a str, MessageError> {
-        // Grab the body data from the table
-        if let Some(body) = self.attributed_body(db) {
-            // Attempt to deserialize the typedstream data
-            let mut typedstream = TypedStreamReader::from(&body);
-            self.components = typedstream.parse().ok();
-
-            // If we deserialize the typedstream, use that data
-            self.text = self
-                .components
-                .as_ref()
-                .and_then(|items| items.first())
-                .and_then(|item| item.as_nsstring())
-                .map(String::from);
-
-            // If the above parsing failed, fall back to the legacy parser instead
-            if self.text.is_none() {
-                self.text = Some(streamtyped::parse(body)?);
-            }
-        }
-
         // Generate the edited message data
         self.edited_parts = self
             .is_edited()
@@ -499,11 +444,85 @@ impl Message {
             .as_ref()
             .and_then(|payload| EditedMessage::from_map(payload).ok());
 
+        // Grab the body data from the table
+        if let Some(body) = self.attributed_body(db) {
+            // Attempt to deserialize the typedstream data
+            let mut typedstream = TypedStreamDeserializer::new(&body);
+            let parsed =
+                parse_body_typedstream(typedstream.iter_root().ok(), self.edited_parts.as_ref());
+
+            if let Some(parsed) = parsed {
+                // Determine if the message is a single URL
+                let is_single_url = match &parsed.components[..] {
+                    [BubbleComponent::Text(text_attrs)] => match &text_attrs[..] {
+                        [TextAttributes { effects, .. }] => {
+                            matches!(&effects[..], [TextEffect::Link(_)])
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+
+                self.text = parsed.text;
+
+                // If the message is a single URL or has a balloon bundle ID
+                // set the components to just the app component
+                if self.balloon_bundle_id.is_some() {
+                    self.components = vec![BubbleComponent::App];
+                } else if is_single_url
+                    && self.has_blob(db, MESSAGE, MESSAGE_PAYLOAD, self.rowid.into())
+                {
+                    // This patch is to handle the case where a message is a single URL
+                    // but the `balloon_bundle_id` is not set.
+                    // This case can only hit if there was payload data provided for the preview,
+                    // but no `balloon_bundle_id` was set.
+                    self.balloon_bundle_id =
+                        Some("com.apple.messages.URLBalloonProvider".to_string());
+                    self.components = vec![BubbleComponent::App];
+                } else {
+                    self.components = parsed.components;
+                }
+            }
+
+            // If the above parsing failed, fall back to the legacy parser instead
+            if self.text.is_none() {
+                self.text = Some(streamtyped::parse(body)?);
+
+                // Fallback component parser as well
+                if self.components.is_empty() {
+                    self.components = parse_body_legacy(&self.text);
+                }
+            }
+        }
+
         if let Some(t) = &self.text {
             Ok(t)
         } else {
             Err(MessageError::NoText)
         }
+    }
+
+    /// Generates the text using the legacy parser only, ignoring any typedstream data.
+    /// This is useful for messages that do not have typedstream data, such as those from older iOS versions.
+    ///
+    /// Warning: This method does not handle typedstream data and will not parse all message types correctly.
+    pub fn generate_text_legacy<'a>(
+        &'a mut self,
+        db: &'a Connection,
+    ) -> Result<&'a str, MessageError> {
+        // If the text is missing, try and query for it
+        if self.text.is_none() {
+            if let Some(body) = self.attributed_body(db) {
+                self.text = Some(streamtyped::parse(body)?);
+            }
+        }
+
+        // Fallback component parser as well
+        if self.components.is_empty() {
+            self.components = parse_body_legacy(&self.text);
+        }
+
+        self.text.as_deref().ok_or(MessageError::NoText)
     }
 
     /// Calculates the date a message was written to the database.
@@ -772,7 +791,7 @@ impl Message {
 
     /// Get the number of messages in the database
     ///
-    /// # Example:
+    /// # Example
     ///
     /// ```
     /// use imessage_database::util::dirs::default_db_path;
@@ -787,7 +806,7 @@ impl Message {
     /// ```
     pub fn get_count(db: &Connection, context: &QueryContext) -> Result<u64, TableError> {
         let mut statement = if context.has_filters() {
-            db.prepare(&format!(
+            db.prepare_cached(&format!(
                 "SELECT
                      COUNT(*)
                  FROM {MESSAGE} as m
@@ -797,7 +816,7 @@ impl Message {
                 Self::generate_filter_statement(context, true)
             ))
             .or_else(|_| {
-                db.prepare(&format!(
+                db.prepare_cached(&format!(
                     "SELECT
                          COUNT(*)
                      FROM {MESSAGE} as m
@@ -807,7 +826,7 @@ impl Message {
                 ))
             })?
         } else {
-            db.prepare(&format!("SELECT COUNT(*) FROM {MESSAGE}"))?
+            db.prepare_cached(&format!("SELECT COUNT(*) FROM {MESSAGE}"))?
         };
         // Execute query, defaulting to zero if it fails
         let count: u64 = statement.query_row([], |r| r.get(0)).unwrap_or(0);
@@ -817,7 +836,7 @@ impl Message {
 
     /// Stream messages from the database with optional filters.
     ///
-    /// # Example:
+    /// # Example
     ///
     /// ```
     /// use imessage_database::util::dirs::default_db_path;
@@ -838,27 +857,29 @@ impl Message {
     pub fn stream_rows<'a>(
         db: &'a Connection,
         context: &'a QueryContext,
-    ) -> Result<Statement<'a>, TableError> {
+    ) -> Result<CachedStatement<'a>, TableError> {
         if !context.has_filters() {
             return Self::get(db);
         }
         Ok(db
-            .prepare(&ios_16_newer_query(Some(&Self::generate_filter_statement(
+            .prepare_cached(&ios_16_newer_query(Some(&Self::generate_filter_statement(
                 context, true,
             ))))
             .or_else(|_| {
-                db.prepare(&ios_14_15_query(Some(&Self::generate_filter_statement(
+                db.prepare_cached(&ios_14_15_query(Some(&Self::generate_filter_statement(
                     context, false,
                 ))))
             })
             .or_else(|_| {
-                db.prepare(&ios_13_older_query(Some(&Self::generate_filter_statement(
+                db.prepare_cached(&ios_13_older_query(Some(&Self::generate_filter_statement(
                     context, false,
                 ))))
             })?)
     }
 
-    /// See [`Tapback`] for details on this data.
+    /// Clean and parse the associated message GUID for tapbacks and replies.
+    ///
+    /// Returns a tuple of (component index, message GUID) if present.
     #[must_use]
     pub fn clean_associated_guid(&self) -> Option<(usize, &str)> {
         if let Some(guid) = &self.associated_message_guid {
@@ -928,6 +949,8 @@ impl Message {
             return match associated_message_type {
                 // Standard iMessages with either text or a message payload
                 0 | 2 | 3 => match parse_balloon_bundle_id(self.balloon_bundle_id.as_deref()) {
+                    // This is the most common case
+                    None => Variant::Normal,
                     Some(bundle_id) => match bundle_id {
                         "com.apple.messages.URLBalloonProvider" => Variant::App(CustomBalloon::URL),
                         "com.apple.Handwriting.HandwritingProvider" => {
@@ -951,8 +974,6 @@ impl Message {
                         "com.apple.findmy.FindMyMessagesApp" => Variant::App(CustomBalloon::FindMy),
                         _ => Variant::App(CustomBalloon::Application(bundle_id)),
                     },
-                    // This is the most common case
-                    None => Variant::Normal,
                 },
 
                 // Stickers overlaid on messages
@@ -1075,7 +1096,7 @@ impl Message {
     /// This column contains data used by iMessage app balloons and can be parsed with
     /// [`parse_ns_keyed_archiver()`](crate::util::plist::parse_ns_keyed_archiver).
     pub fn payload_data(&self, db: &Connection) -> Option<Value> {
-        Value::from_reader(self.get_blob(db, MESSAGE_PAYLOAD)?).ok()
+        Value::from_reader(self.get_blob(db, MESSAGE, MESSAGE_PAYLOAD, self.rowid.into())?).ok()
     }
 
     /// Get a message's raw data from the [`MESSAGE_PAYLOAD`] BLOB column
@@ -1086,7 +1107,7 @@ impl Message {
     /// This column contains data used by [`HandwrittenMessage`](crate::message_types::handwriting::HandwrittenMessage)s.
     pub fn raw_payload_data(&self, db: &Connection) -> Option<Vec<u8>> {
         let mut buf = Vec::new();
-        self.get_blob(db, MESSAGE_PAYLOAD)?
+        self.get_blob(db, MESSAGE, MESSAGE_PAYLOAD, self.rowid.into())?
             .read_to_end(&mut buf)
             .ok()?;
         Some(buf)
@@ -1099,7 +1120,8 @@ impl Message {
     ///
     /// This column contains data used by [`edited`](crate::message_types::edited) iMessages.
     pub fn message_summary_info(&self, db: &Connection) -> Option<Value> {
-        Value::from_reader(self.get_blob(db, MESSAGE_SUMMARY_INFO)?).ok()
+        Value::from_reader(self.get_blob(db, MESSAGE, MESSAGE_SUMMARY_INFO, self.rowid.into())?)
+            .ok()
     }
 
     /// Get a message's [typedstream](crate::util::typedstream) from the [`ATTRIBUTED_BODY`] BLOB column
@@ -1110,7 +1132,7 @@ impl Message {
     /// This column contains the message's body text with any other attributes.
     pub fn attributed_body(&self, db: &Connection) -> Option<Vec<u8>> {
         let mut body = vec![];
-        self.get_blob(db, ATTRIBUTED_BODY)?
+        self.get_blob(db, MESSAGE, ATTRIBUTED_BODY, self.rowid.into())?
             .read_to_end(&mut body)
             .ok();
         Some(body)
@@ -1201,6 +1223,8 @@ impl Message {
     #[must_use]
     /// Create a blank test message with default values
     pub fn blank() -> Message {
+        use std::vec;
+
         Message {
             rowid: i32::default(),
             guid: String::default(),
@@ -1232,7 +1256,7 @@ impl Message {
             num_attachments: 0,
             deleted_from: None,
             num_replies: 0,
-            components: None,
+            components: vec![],
             edited_parts: None,
         }
     }

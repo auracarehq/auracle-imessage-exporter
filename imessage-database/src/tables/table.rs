@@ -32,12 +32,9 @@
 
 use std::{collections::HashMap, fs::metadata, path::Path};
 
-use rusqlite::{Connection, Error, OpenFlags, Result, Row, Statement, blob::Blob};
+use rusqlite::{CachedStatement, Connection, Error, OpenFlags, Result, Row, blob::Blob};
 
-use crate::{
-    error::table::{TableConnectError, TableError},
-    tables::messages::models::BubbleComponent,
-};
+use crate::error::table::{TableConnectError, TableError};
 
 /// Defines behavior for SQL Table data
 pub trait Table: Sized {
@@ -45,7 +42,7 @@ pub trait Table: Sized {
     fn from_row(row: &Row) -> Result<Self>;
 
     /// Prepare SELECT * statement
-    fn get(db: &Connection) -> Result<Statement, TableError>;
+    fn get(db: &Connection) -> Result<CachedStatement, TableError>;
 
     /// Map a `rusqlite::Result<Self>` into our `TableError`
     fn extract(item: Result<Result<Self, Error>, Error>) -> Result<Self, TableError>;
@@ -88,6 +85,39 @@ pub trait Table: Sized {
     {
         stream_table_callback::<Self, F, E>(db, callback)
     }
+
+    /// Get a BLOB from the table
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - The database connection
+    /// * `table` - The name of the table
+    /// * `column` - The name of the column containing the BLOB
+    /// * `rowid` - The row ID to retrieve the BLOB from
+    fn get_blob<'a>(
+        &self,
+        db: &'a Connection,
+        table: &str,
+        column: &str,
+        rowid: i64,
+    ) -> Option<Blob<'a>> {
+        db.blob_open(rusqlite::MAIN_DB, table, column, rowid, true)
+            .ok()
+    }
+
+    /// Check if a BLOB exists in the table
+    fn has_blob(&self, db: &Connection, table: &str, column: &str, rowid: i64) -> bool {
+        let sql = std::format!(
+            "SELECT ({column} IS NOT NULL) AS not_null
+         FROM {table}
+         WHERE rowid = ?1",
+        );
+
+        // This returns 1 for true, 0 for false.
+        db.query_row(&sql, [rowid], |row| row.get(0))
+            .ok()
+            .is_some_and(|v: i32| v != 0)
+    }
 }
 
 fn stream_table_callback<T, F, E>(db: &Connection, mut callback: F) -> Result<(), TableError>
@@ -127,57 +157,6 @@ pub trait Deduplicate {
 pub trait Diagnostic {
     /// Emit diagnostic data about the table to `stdout`
     fn run_diagnostic(db: &Connection) -> Result<(), TableError>;
-}
-
-/// Defines behavior for getting BLOB data from from a table
-pub trait GetBlob {
-    /// Retreive `BLOB` data from a table
-    fn get_blob<'a>(&self, db: &'a Connection, column: &str) -> Option<Blob<'a>>;
-}
-
-/// Defines behavior for deserializing a message's [`typedstream`](crate::util::typedstream) body data in native Rust
-pub trait AttributedBody {
-    /// Get a vector of a message body's components. If the text has not been captured, the vector will be empty.
-    ///
-    /// # Parsing
-    ///
-    /// There are two different ways this crate will attempt to parse this data.
-    ///
-    /// ## Default parsing
-    ///
-    /// In most cases, the message body will be deserialized using the [`typedstream`](crate::util::typedstream) deserializer.
-    ///
-    /// *Note*: message body text can be formatted with a [`Vec`] of [`TextAttributes`](crate::tables::messages::models::TextAttributes).
-    ///
-    /// ## Legacy parsing
-    ///
-    /// If the `typedstream` data cannot be deserialized, this method falls back to a legacy string parsing algorithm that
-    /// only supports unstyled text.
-    ///
-    /// If the message has attachments, there will be one [`U+FFFC`](https://www.compart.com/en/unicode/U+FFFC) character
-    /// for each attachment and one [`U+FFFD`](https://www.compart.com/en/unicode/U+FFFD) for app messages that we need
-    /// to format.
-    ///
-    /// ## Sample
-    ///
-    /// An iMessage that contains body text like:
-    ///
-    /// ```
-    /// let message_text = "\u{FFFC}Check out this photo!";
-    /// ```
-    ///
-    /// Will have a `body()` of:
-    ///
-    /// ```
-    /// use imessage_database::message_types::text_effects::TextEffect;
-    /// use imessage_database::tables::messages::{models::{TextAttributes, BubbleComponent, AttachmentMeta}};
-    ///  
-    /// let result = vec![
-    ///     BubbleComponent::Attachment(AttachmentMeta::default()),
-    ///     BubbleComponent::Text(vec![TextAttributes::new(3, 24, TextEffect::Default)]),
-    /// ];
-    /// ```
-    fn body(&self) -> Vec<BubbleComponent>;
 }
 
 /// Get a connection to the iMessage `SQLite` database

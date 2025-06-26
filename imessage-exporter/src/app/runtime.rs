@@ -565,7 +565,7 @@ impl Config {
             num_attachments: 0,
             deleted_from: None,
             num_replies: 0,
-            components: None,
+            components: vec![],
             edited_parts: None,
         }
     }

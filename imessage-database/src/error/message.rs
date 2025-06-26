@@ -4,6 +4,8 @@
 
 use std::fmt::{Display, Formatter, Result};
 
+use crabstep::error::TypedStreamError;
+
 use crate::error::streamtyped::StreamTypedError;
 
 /// Errors that can happen when working with message table data
@@ -13,6 +15,8 @@ pub enum MessageError {
     NoText,
     /// Error occurred when parsing with the `StreamTyped` parser
     StreamTypedParseError(StreamTypedError),
+    /// Error occurred when deserializing a `typedstream`
+    TypedStreamError(TypedStreamError),
     /// Timestamp value is invalid or out of range
     InvalidTimestamp(i64),
 }
@@ -30,6 +34,12 @@ impl Display for MessageError {
             MessageError::InvalidTimestamp(when) => {
                 write!(fmt, "Timestamp is invalid: {when}")
             }
+            MessageError::TypedStreamError(typed_stream_error) => {
+                write!(
+                    fmt,
+                    "Failed to deserialize typed stream: {typed_stream_error}"
+                )
+            }
         }
     }
 }
@@ -37,5 +47,11 @@ impl Display for MessageError {
 impl From<StreamTypedError> for MessageError {
     fn from(err: StreamTypedError) -> Self {
         MessageError::StreamTypedParseError(err)
+    }
+}
+
+impl From<TypedStreamError> for MessageError {
+    fn from(err: TypedStreamError) -> Self {
+        MessageError::TypedStreamError(err)
     }
 }

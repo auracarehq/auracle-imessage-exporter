@@ -27,6 +27,35 @@ const END_PATTERN: [u8; 2] = [0x0086, 0x0084];
 /// ```
 ///
 /// In that example, the returned body text would be `"Example message"`.
+///
+/// ## Legacy parsing
+///
+/// If the `typedstream` data cannot be deserialized, we fall back to athislegacy string parsing algorithm that
+/// only supports unstyled text.
+///
+/// If the message has attachments, there will be one [`U+FFFC`](https://www.compart.com/en/unicode/U+FFFC) character
+/// for each attachment and one [`U+FFFD`](https://www.compart.com/en/unicode/U+FFFD) for app messages that we need
+/// to format.
+///
+/// ## Sample
+///
+/// An iMessage that contains body text like:
+///
+/// ```
+/// let message_text = "\u{FFFC}Check out this photo!";
+/// ```
+///
+/// Will have a `body()` of:
+///
+/// ```
+/// use imessage_database::message_types::text_effects::TextEffect;
+/// use imessage_database::tables::messages::{models::{TextAttributes, BubbleComponent, AttachmentMeta}};
+///  
+/// let result = vec![
+///     BubbleComponent::Attachment(AttachmentMeta::default()),
+///     BubbleComponent::Text(vec![TextAttributes::new(3, 24, vec![TextEffect::Default])]),
+/// ];
+/// ```
 pub fn parse(mut stream: Vec<u8>) -> Result<String, StreamTypedError> {
     // Find the start index and drain
     for idx in 0..stream.len() {
@@ -176,6 +205,7 @@ mod tests {
 
     #[test]
     fn test_parse_text_app() {
+        // This test removed a block of text so the pointers become misaligned during parsing
         let plist_path = current_dir()
             .unwrap()
             .as_path()

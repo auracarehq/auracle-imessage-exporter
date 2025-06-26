@@ -3,7 +3,7 @@
 */
 
 use plist::Value;
-use rusqlite::{Connection, Error, Result, Row, Statement, blob::Blob};
+use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 use sha1::{Digest, Sha1};
 
 use std::{
@@ -17,7 +17,7 @@ use crate::{
     message_types::sticker::{StickerEffect, StickerSource, get_sticker_effect},
     tables::{
         messages::Message,
-        table::{ATTACHMENT, ATTRIBUTION_INFO, GetBlob, STICKER_USER_INFO, Table},
+        table::{ATTACHMENT, ATTRIBUTION_INFO, STICKER_USER_INFO, Table},
     },
     util::{
         dates::TIMESTAMP_FACTOR,
@@ -120,8 +120,8 @@ impl Table for Attachment {
         })
     }
 
-    fn get(db: &Connection) -> Result<Statement, TableError> {
-        Ok(db.prepare(&format!("SELECT * from {ATTACHMENT}"))?)
+    fn get(db: &Connection) -> Result<CachedStatement, TableError> {
+        Ok(db.prepare_cached(&format!("SELECT * from {ATTACHMENT}"))?)
     }
 
     fn extract(attachment: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
@@ -129,20 +129,6 @@ impl Table for Attachment {
             Ok(Ok(attachment)) => Ok(attachment),
             Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
         }
-    }
-}
-
-impl GetBlob for Attachment {
-    /// Extract a blob of data that belongs to a single attachment from a given column
-    fn get_blob<'a>(&self, db: &'a Connection, column: &str) -> Option<Blob<'a>> {
-        db.blob_open(
-            rusqlite::MAIN_DB,
-            ATTACHMENT,
-            column,
-            i64::from(self.rowid),
-            true,
-        )
-        .ok()
     }
 }
 
@@ -495,7 +481,8 @@ impl Attachment {
     ///
     /// This column contains data used for sticker attachments.
     fn sticker_info(&self, db: &Connection) -> Option<Value> {
-        Value::from_reader(self.get_blob(db, STICKER_USER_INFO)?).ok()
+        Value::from_reader(self.get_blob(db, ATTACHMENT, STICKER_USER_INFO, self.rowid.into())?)
+            .ok()
     }
 
     /// Get an attachment's plist from the [`ATTRIBUTION_INFO`] BLOB column
@@ -505,7 +492,7 @@ impl Attachment {
     ///
     /// This column contains metadata used by image attachments.
     fn attribution_info(&self, db: &Connection) -> Option<Value> {
-        Value::from_reader(self.get_blob(db, ATTRIBUTION_INFO)?).ok()
+        Value::from_reader(self.get_blob(db, ATTACHMENT, ATTRIBUTION_INFO, self.rowid.into())?).ok()
     }
 
     /// Parse a sticker's source from the Bundle ID stored in [`STICKER_USER_INFO`] `plist` data

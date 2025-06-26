@@ -17,4 +17,4 @@ fs2 = "=0.4.3"
 imessage-database = { path = "../imessage-database" }
 indicatif = "=0.17.11"
 rusqlite = { version = "0.36.0", features = ["blob", "bundled"] }
-crabapple = { version = "=0.4.1" }
+crabapple = { version = "=0.4.2" }

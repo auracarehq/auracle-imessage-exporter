@@ -232,7 +232,7 @@ mod guid_query_tests {
             Message::from_guid("0355C6E1-D0C8-4212-AA87-DD8AE4FD1203", &conn).unwrap();
         let _ = message.generate_text(&conn);
         println!("{message:#?}");
-        assert!(message.components.is_some());
+        assert!(!message.components.is_empty());
     }
 
     #[test]
