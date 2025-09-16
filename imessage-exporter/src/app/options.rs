@@ -21,6 +21,7 @@ use crate::app::{
     export_type::ExportType,
 };
 
+// MARK: Constants
 /// Default export directory name
 pub const DEFAULT_OUTPUT_DIR: &str = "imessage_export";
 
@@ -51,6 +52,7 @@ pub const ABOUT: &str = concat!(
     "to find problems with the iMessage database."
 );
 
+// MARK: Options
 #[derive(Debug, PartialEq, Eq)]
 pub struct Options {
     /// Path to database file
@@ -83,6 +85,7 @@ pub struct Options {
     pub cleartext_password: Option<String>,
 }
 
+// MARK: Validation
 impl Options {
     pub fn from_args(args: &ArgMatches) -> Result<Self, RuntimeError> {
         let user_path: Option<&String> = args.get_one(OPTION_DB_PATH);
@@ -161,15 +164,15 @@ impl Options {
 
         // Build query context
         let mut query_context = QueryContext::default();
-        if let Some(start) = start_date {
-            if let Err(why) = query_context.set_start(start) {
-                return Err(RuntimeError::InvalidOptions(format!("{why}")));
-            }
+        if let Some(start) = start_date
+            && let Err(why) = query_context.set_start(start)
+        {
+            return Err(RuntimeError::InvalidOptions(format!("{why}")));
         }
-        if let Some(end) = end_date {
-            if let Err(why) = query_context.set_end(end) {
-                return Err(RuntimeError::InvalidOptions(format!("{why}")));
-            }
+        if let Some(end) = end_date
+            && let Err(why) = query_context.set_end(end)
+        {
+            return Err(RuntimeError::InvalidOptions(format!("{why}")));
         }
 
         // We have to allocate a PathBuf here because it can be created from data owned by this function in the default state
@@ -265,35 +268,35 @@ fn validate_path(
         PathBuf::from(export_path.unwrap_or(&format!("{}/{DEFAULT_OUTPUT_DIR}", home())));
 
     // If there is an export type selected, ensure we do not overwrite files of the same type
-    if let Some(export_type) = export_type {
-        if resolved_path.exists() {
-            // Get the word to use if there is a problem with the specified path
-            let path_word = match export_path {
-                Some(_) => "Specified",
-                None => "Default",
-            };
+    if let Some(export_type) = export_type
+        && resolved_path.exists()
+    {
+        // Get the word to use if there is a problem with the specified path
+        let path_word = match export_path {
+            Some(_) => "Specified",
+            None => "Default",
+        };
 
-            // Ensure the directory exists and does not contain files of the same export type
-            match resolved_path.read_dir() {
-                Ok(files) => {
-                    let export_type_extension = export_type.to_string();
-                    for file in files.flatten() {
-                        if file
-                            .path()
-                            .extension()
-                            .is_some_and(|s| s.to_str().unwrap_or("") == export_type_extension)
-                        {
-                            return Err(RuntimeError::InvalidOptions(format!(
-                                "{path_word} export path {resolved_path:?} contains existing \"{export_type}\" export data!"
-                            )));
-                        }
+        // Ensure the directory exists and does not contain files of the same export type
+        match resolved_path.read_dir() {
+            Ok(files) => {
+                let export_type_extension = export_type.to_string();
+                for file in files.flatten() {
+                    if file
+                        .path()
+                        .extension()
+                        .is_some_and(|s| s.to_str().unwrap_or("") == export_type_extension)
+                    {
+                        return Err(RuntimeError::InvalidOptions(format!(
+                            "{path_word} export path {resolved_path:?} contains existing \"{export_type}\" export data!"
+                        )));
                     }
                 }
-                Err(why) => {
-                    return Err(RuntimeError::InvalidOptions(format!(
-                        "{path_word} export path {resolved_path:?} is not a valid directory: {why}"
-                    )));
-                }
+            }
+            Err(why) => {
+                return Err(RuntimeError::InvalidOptions(format!(
+                    "{path_word} export path {resolved_path:?} is not a valid directory: {why}"
+                )));
             }
         }
     }
@@ -301,6 +304,7 @@ fn validate_path(
     Ok(resolved_path)
 }
 
+// MARK: CLI
 /// Build the command line argument parser
 fn get_command() -> Command {
     Command::new("iMessage Exporter")

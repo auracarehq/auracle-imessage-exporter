@@ -3,6 +3,7 @@ use std::{
         HashMap,
         hash_map::Entry::{Occupied, Vacant},
     },
+    fmt::Write as FmtWrite,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -13,7 +14,7 @@ use crate::{
         compatibility::attachment_manager::AttachmentManagerMode, error::RuntimeError,
         progress::ExportProgress, runtime::Config,
     },
-    exporters::exporter::{ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, Writer},
+    exporters::exporter::{ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, MessageFormatter},
 };
 
 use imessage_database::{
@@ -28,6 +29,7 @@ use imessage_database::{
         handwriting::HandwrittenMessage,
         music::MusicMessage,
         placemark::PlacemarkMessage,
+        polls::Poll,
         sticker::StickerSource,
         url::URLMessage,
         variants::{
@@ -61,6 +63,7 @@ pub struct TXT<'a> {
     pb: ExportProgress,
 }
 
+// MARK: Exporter
 impl<'a> Exporter<'a> for TXT<'a> {
     fn new(config: &'a Config) -> Result<Self, RuntimeError> {
         let mut orphaned = config.options.export_path.clone();
@@ -119,8 +122,8 @@ impl<'a> Exporter<'a> for TXT<'a> {
                 let announcement = self.format_announcement(&msg);
                 TXT::write_to_file(self.get_or_create_file(&msg)?, &announcement)?;
             }
-            // Message replies and tapbacks are rendered in context, so no need to render them separately
-            else if !msg.is_tapback() {
+            // Message tapbacks and poll votes are rendered in context, so no need to render them
+            else if !msg.is_tapback() && !msg.is_poll_vote() && !msg.is_poll_update() {
                 let message = self.format_message(&msg, 0)?;
                 TXT::write_to_file(self.get_or_create_file(&msg)?, &message)?;
             }
@@ -157,13 +160,19 @@ impl<'a> Exporter<'a> for TXT<'a> {
             None => Ok(&mut self.orphaned),
         }
     }
+
+    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
+        file.write_all(text.as_bytes())
+            .map_err(RuntimeError::DiskError)
+    }
 }
 
-impl<'a> Writer<'a> for TXT<'a> {
+// MARK: Writer
+impl<'a> MessageFormatter<'a> for TXT<'a> {
     fn format_message(&self, message: &Message, indent_size: usize) -> Result<String, TableError> {
         let indent = String::from_iter((0..indent_size).map(|_| " "));
         // Data we want to write to a file
-        let mut formatted_message = String::new();
+        let mut formatted_message = String::with_capacity(1024);
 
         // Add message date
         self.add_line(&mut formatted_message, &self.get_time(message), &indent);
@@ -218,17 +227,15 @@ impl<'a> Writer<'a> for TXT<'a> {
         // Generate the message body from it's components
         for (idx, message_part) in message_parts.iter().enumerate() {
             match message_part {
-                // Fitness messages have a prefix that we need to replace with the opposite if who sent the message
                 BubbleComponent::Text(text_attrs) => {
                     if let Some(text) = &message.text {
                         // Render edited message content, if applicable
                         if message.is_part_edited(idx) {
-                            if let Some(edited_parts) = &message.edited_parts {
-                                if let Some(edited) =
+                            if let Some(edited_parts) = &message.edited_parts
+                                && let Some(edited) =
                                     self.format_edited(message, edited_parts, idx, &indent)
-                                {
-                                    self.add_line(&mut formatted_message, &edited, &indent);
-                                }
+                            {
+                                self.add_line(&mut formatted_message, &edited, &indent);
                             }
                         } else {
                             let mut formatted_text = self.format_attributes(text, text_attrs);
@@ -238,7 +245,19 @@ impl<'a> Writer<'a> for TXT<'a> {
                                 formatted_text.push_str(text);
                             }
 
-                            if formatted_text.starts_with(FITNESS_RECEIVER) {
+                            if self.config.translated_messages.contains(&message.guid)
+                                && let Ok(Some(translation)) =
+                                    message.get_translation(self.config.db())
+                            {
+                                self.add_line(
+                                    &mut formatted_message,
+                                    &translation.translated_text,
+                                    &indent,
+                                );
+                                self.add_line(&mut formatted_message, "Translated from:", &indent);
+                                self.add_line(&mut formatted_message, &formatted_text, &indent);
+                            } else if formatted_text.starts_with(FITNESS_RECEIVER) {
+                                // Fitness messages have a prefix that we need to replace with the opposite if who sent the message
                                 self.add_line(
                                     &mut formatted_message,
                                     &formatted_text.replace(FITNESS_RECEIVER, YOU),
@@ -259,13 +278,13 @@ impl<'a> Writer<'a> for TXT<'a> {
                             } else {
                                 match self.format_attachment(attachment, message, metadata) {
                                     Ok(result) => {
-                                        attachment_index += 1;
                                         self.add_line(&mut formatted_message, &result, &indent);
                                     }
                                     Err(result) => {
                                         self.add_line(&mut formatted_message, result, &indent);
                                     }
                                 }
+                                attachment_index += 1;
                             }
                         }
                         // Attachment does not exist in attachments table
@@ -284,12 +303,11 @@ impl<'a> Writer<'a> for TXT<'a> {
                     ),
                 },
                 BubbleComponent::Retracted => {
-                    if let Some(edited_parts) = &message.edited_parts {
-                        if let Some(edited) =
+                    if let Some(edited_parts) = &message.edited_parts
+                        && let Some(edited) =
                             self.format_edited(message, edited_parts, idx, &indent)
-                        {
-                            self.add_line(&mut formatted_message, &edited, &indent);
-                        }
+                    {
+                        self.add_line(&mut formatted_message, &edited, &indent);
                     }
                 }
             }
@@ -304,27 +322,27 @@ impl<'a> Writer<'a> for TXT<'a> {
             }
 
             // Handle Tapbacks
-            if let Some(tapbacks_map) = self.config.tapbacks.get(&message.guid) {
-                if let Some(tapbacks) = tapbacks_map.get(&idx) {
-                    let mut formatted_tapbacks = String::new();
-                    tapbacks
-                        .iter()
-                        .try_for_each(|tapbacks| -> Result<(), TableError> {
-                            let formatted = self.format_tapback(tapbacks)?;
-                            if !formatted.is_empty() {
-                                self.add_line(
-                                    &mut formatted_tapbacks,
-                                    &self.format_tapback(tapbacks)?,
-                                    &indent,
-                                );
-                            }
-                            Ok(())
-                        })?;
+            if let Some(tapbacks_map) = self.config.tapbacks.get(&message.guid)
+                && let Some(tapbacks) = tapbacks_map.get(&idx)
+            {
+                let mut formatted_tapbacks = String::new();
+                tapbacks
+                    .iter()
+                    .try_for_each(|tapbacks| -> Result<(), TableError> {
+                        let formatted = self.format_tapback(tapbacks)?;
+                        if !formatted.is_empty() {
+                            self.add_line(
+                                &mut formatted_tapbacks,
+                                &self.format_tapback(tapbacks)?,
+                                &indent,
+                            );
+                        }
+                        Ok(())
+                    })?;
 
-                    if !formatted_tapbacks.is_empty() {
-                        self.add_line(&mut formatted_message, "Tapbacks:", &indent);
-                        self.add_line(&mut formatted_message, &formatted_tapbacks, &indent);
-                    }
+                if !formatted_tapbacks.is_empty() {
+                    self.add_line(&mut formatted_message, "Tapbacks:", &indent);
+                    self.add_line(&mut formatted_message, &formatted_tapbacks, &indent);
                 }
             }
 
@@ -420,7 +438,7 @@ impl<'a> Writer<'a> for TXT<'a> {
                         StickerSource::Genmoji => {
                             // Add sticker prompt
                             if let Some(prompt) = &sticker.emoji_description {
-                                out_s = format!("{out_s} (Genmoji prompt: {prompt})");
+                                let _ = write!(out_s, " (Genmoji prompt: {prompt})");
                             }
                         }
                         StickerSource::Memoji => out_s.push_str(" (App: Memoji)"),
@@ -439,7 +457,7 @@ impl<'a> Writer<'a> for TXT<'a> {
                             let app_name = sticker
                                 .get_sticker_source_application_name(self.config.db())
                                 .unwrap_or(bundle_id);
-                            out_s.push_str(&format!(" (App: {app_name})"));
+                            let _ = write!(out_s, " (App: {app_name})");
                         }
                     }
                 }
@@ -459,23 +477,33 @@ impl<'a> Writer<'a> for TXT<'a> {
         if let Variant::App(balloon) = message.variant() {
             let mut app_bubble = String::new();
 
-            // Handwritten messages use a different payload type, so check that first
-            if message.is_handwriting() {
-                if let Some(payload) = message.raw_payload_data(self.config.db()) {
-                    return match HandwrittenMessage::from_payload(&payload) {
-                        Ok(bubble) => Ok(self.format_handwriting(message, &bubble, indent)),
-                        Err(why) => Err(PlistParseError::HandwritingError(why)),
-                    };
-                }
+            // Handwritten messages use a different payload type
+            if message.is_handwriting()
+                && let Some(payload) = message.raw_payload_data(self.config.db())
+            {
+                return match HandwrittenMessage::from_payload(&payload) {
+                    Ok(bubble) => Ok(self.format_handwriting(message, &bubble, indent)),
+                    Err(why) => Err(PlistParseError::HandwritingError(why)),
+                };
             }
 
-            if message.is_digital_touch() {
-                if let Some(payload) = message.raw_payload_data(self.config.db()) {
-                    return match digital_touch::from_payload(&payload) {
-                        Some(bubble) => Ok(self.format_digital_touch(message, &bubble, indent)),
-                        None => Err(PlistParseError::DigitalTouchError),
-                    };
-                }
+            // Digital touch messages use a different payload type
+            if message.is_digital_touch()
+                && let Some(payload) = message.raw_payload_data(self.config.db())
+            {
+                return match digital_touch::from_payload(&payload) {
+                    Some(bubble) => Ok(self.format_digital_touch(message, &bubble, indent)),
+                    None => Err(PlistParseError::DigitalTouchError),
+                };
+            }
+
+            // Poll messages use a different payload type
+            if message.is_poll() {
+                let poll = message.as_poll(self.config.db())?;
+                return match poll {
+                    Some(poll) => Ok(self.format_poll(&poll, indent)),
+                    None => Err(PlistParseError::WrongMessageType),
+                };
             }
 
             if let Some(payload) = message.payload_data(self.config.db()) {
@@ -507,9 +535,12 @@ impl<'a> Writer<'a> for TXT<'a> {
                             CustomBalloon::Slideshow => self.format_slideshow(&bubble, indent),
                             CustomBalloon::CheckIn => self.format_check_in(&bubble, indent),
                             CustomBalloon::FindMy => self.format_find_my(&bubble, indent),
-                            CustomBalloon::Handwriting => unreachable!(),
-                            CustomBalloon::DigitalTouch => unreachable!(),
-                            CustomBalloon::URL => unreachable!(),
+                            CustomBalloon::Polls
+                            | CustomBalloon::Handwriting
+                            | CustomBalloon::DigitalTouch
+                            | CustomBalloon::URL => {
+                                unreachable!()
+                            }
                         },
                         Err(why) => return Err(why),
                     }
@@ -517,10 +548,10 @@ impl<'a> Writer<'a> for TXT<'a> {
                 app_bubble.push_str(&res);
             } else {
                 // Sometimes, URL messages are missing their payloads
-                if message.is_url() {
-                    if let Some(text) = &message.text {
-                        return Ok(text.to_string());
-                    }
+                if message.is_url()
+                    && let Some(text) = &message.text
+                {
+                    return Ok(text.to_string());
                 }
                 return Err(PlistParseError::NoPayload);
             }
@@ -632,6 +663,12 @@ impl<'a> Writer<'a> for TXT<'a> {
                         GroupAction::ParticipantLeft => "left the conversation.".to_string(),
                         GroupAction::GroupIconChanged => "changed the group photo.".to_string(),
                         GroupAction::GroupIconRemoved => "removed the group photo.".to_string(),
+                        GroupAction::ChatBackgroundChanged => {
+                            "changed the chat background.".to_string()
+                        }
+                        GroupAction::ChatBackgroundRemoved => {
+                            "removed the chat background.".to_string()
+                        }
                     },
                     Announcement::AudioMessageKept => "kept an audio message.".to_string(),
                     Announcement::FullyUnsent => "unsent a message!".to_string(),
@@ -748,13 +785,9 @@ impl<'a> Writer<'a> for TXT<'a> {
         }
         formatted_text
     }
-
-    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
-        file.write_all(text.as_bytes())
-            .map_err(RuntimeError::DiskError)
-    }
 }
 
+// MARK: Balloon
 impl<'a> BalloonFormatter<&'a str> for TXT<'a> {
     fn format_url(&self, msg: &Message, balloon: &URLMessage, indent: &str) -> String {
         let mut out_s = String::new();
@@ -1048,6 +1081,25 @@ impl<'a> BalloonFormatter<&'a str> for TXT<'a> {
         out_s
     }
 
+    fn format_poll(&self, poll: &Poll, indent: &'a str) -> String {
+        let mut out_s = String::from(indent);
+
+        for poll_option in &poll.order {
+            if let Some(option) = poll.options.get(poll_option) {
+                self.add_line(
+                    &mut out_s,
+                    &format!("- {} ({})", option.text, option.votes.len()),
+                    indent,
+                );
+                for vote in &option.votes {
+                    self.add_line(&mut out_s, &format!("  - {}", vote.voter), indent);
+                }
+            }
+        }
+
+        out_s
+    }
+
     fn format_generic_app(
         &self,
         balloon: &AppMessage,
@@ -1096,19 +1148,20 @@ impl<'a> BalloonFormatter<&'a str> for TXT<'a> {
     }
 }
 
+// MARK: Impl
 impl TXT<'_> {
     fn get_time(&self, message: &Message) -> String {
         let mut date = format(&message.date(&self.config.offset));
         let read_after = message.time_until_read(&self.config.offset);
-        if let Some(time) = read_after {
-            if !time.is_empty() {
-                let who = if message.is_from_me() {
-                    "them"
-                } else {
-                    self.config.options.custom_name.as_deref().unwrap_or("you")
-                };
-                date.push_str(&format!(" (Read by {who} after {time})"));
-            }
+        if let Some(time) = read_after
+            && !time.is_empty()
+        {
+            let who = if message.is_from_me() {
+                "them"
+            } else {
+                self.config.options.custom_name.as_deref().unwrap_or("you")
+            };
+            let _ = write!(date, " (Read by {who} after {time})");
         }
         date
     }
@@ -1122,6 +1175,7 @@ impl TXT<'_> {
     }
 }
 
+// MARK: Tests
 #[cfg(test)]
 mod tests {
     use std::env::current_dir;
@@ -1129,7 +1183,7 @@ mod tests {
     use crate::{
         Config, Exporter, Options, TXT,
         app::{compatibility::attachment_manager::AttachmentManagerMode, export_type::ExportType},
-        exporters::exporter::Writer,
+        exporters::exporter::MessageFormatter,
     };
     use imessage_database::{
         message_types::text_effects::TextEffect,
@@ -1537,6 +1591,52 @@ mod tests {
 
         let actual = exporter.format_announcement(&message);
         let expected = "May 17, 2022  5:29:42 PM You changed the group photo.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_chat_background_removed() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+        message.group_action_type = 6;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You removed the chat background.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_chat_background_added() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+        message.group_action_type = 4;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM You changed the chat background.\n\n";
 
         assert_eq!(actual, expected);
     }
@@ -2090,24 +2190,54 @@ mod tests {
             "May 17, 2022  5:29:42 PM\nUnknown\nhttps://www.ghacks.net/2020/01/23/lastpass-no-longer-listed-on-the-chrome-web-store/\nLastPass no longer listed on the Chrome Web Store - gHacks Tech News\nLastPass customers and new users searching for password managers on Google's Chrome Web Store may have noticed that the LastPass extension for Google Chrome is currently no longer listed on the store.\n\n"
         );
     }
+
+    #[test]
+    fn can_format_txt_translated_message() {
+        // Create exporter
+        let mut options = Options::fake_options(ExportType::Txt);
+        options.attachment_manager.mode = AttachmentManagerMode::Clone;
+
+        let mut config = Config::fake_app(options);
+        config
+            .translated_messages
+            .insert("56FE94B9-2345-4A3C-A57F-949BDDDDF9FF".to_string());
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.guid = "56FE94B9-2345-4A3C-A57F-949BDDDDF9FF".to_string();
+        message.rowid = 548216;
+        message.generate_text_legacy(config.db()).unwrap();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "Dec 31, 2000  4:00:00 PM\nUnknown\nOh, il a traduit ce que j'ai envoyé !\nTranslated from:\nOh it translated what I sent!\n\n";
+
+        assert_eq!(actual, expected);
+    }
 }
 
 #[cfg(test)]
 mod balloon_format_tests {
-    use crate::{Config, Exporter, Options, TXT, exporters::exporter::BalloonFormatter};
+    use std::collections::HashMap;
+
+    use crate::{
+        Config, Exporter, Options, TXT, app::export_type::ExportType::Txt,
+        exporters::exporter::BalloonFormatter,
+    };
     use imessage_database::message_types::{
         app::AppMessage,
         app_store::AppStoreMessage,
         collaboration::CollaborationMessage,
         music::MusicMessage,
         placemark::{Placemark, PlacemarkMessage},
+        polls::{Poll, PollOption, PollOptionID, PollVote},
         url::URLMessage,
     };
 
     #[test]
     fn can_format_txt_url() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2132,7 +2262,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_music() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2154,7 +2284,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_music_lyrics() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2176,7 +2306,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_collaboration() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2198,7 +2328,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_apple_pay() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2224,7 +2354,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_fitness() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2250,7 +2380,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_slideshow() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2276,7 +2406,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_find_my() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2302,7 +2432,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_check_in_timer() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2328,7 +2458,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_check_in_timer_late() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2354,7 +2484,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_accepted_check_in() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2380,7 +2510,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_app_store() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2402,7 +2532,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_txt_placemark() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2431,9 +2561,76 @@ mod balloon_format_tests {
     }
 
     #[test]
+    fn can_format_txt_poll() {
+        // Create exporter
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut poll_options: HashMap<PollOptionID, PollOption> = HashMap::new();
+
+        let id1: PollOptionID = "1".to_string();
+        let id2: PollOptionID = "2".to_string();
+        let id3: PollOptionID = "3".to_string();
+
+        poll_options.insert(
+            id1.clone(),
+            PollOption {
+                text: "Rust".to_string(),
+                creator: "alice".to_string(),
+                votes: vec![PollVote {
+                    voter: "carol".to_string(),
+                    option_id: id1.clone(),
+                }],
+            },
+        );
+
+        poll_options.insert(
+            id2.clone(),
+            PollOption {
+                text: "Go".to_string(),
+                creator: "bob".to_string(),
+                votes: vec![
+                    PollVote {
+                        voter: "alice".to_string(),
+                        option_id: id2.clone(),
+                    },
+                    PollVote {
+                        voter: "bob".to_string(),
+                        option_id: id2.clone(),
+                    },
+                ],
+            },
+        );
+
+        poll_options.insert(
+            id3.clone(),
+            PollOption {
+                text: "Python".to_string(),
+                creator: "carol".to_string(),
+                votes: vec![PollVote {
+                    voter: "dave".to_string(),
+                    option_id: id3.clone(),
+                }],
+            },
+        );
+
+        let poll = Poll {
+            options: poll_options,
+            order: vec![id1, id2, id3],
+        };
+
+        let expected = exporter.format_poll(&poll, "");
+        let actual =
+            "- Rust (1)\n  - carol\n- Go (2)\n  - alice\n  - bob\n- Python (1)\n  - dave\n";
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
     fn can_format_txt_generic_app() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2465,7 +2662,8 @@ mod text_effect_tests {
     };
 
     use crate::{
-        Config, Exporter, Options, TXT, app::export_type::ExportType, exporters::exporter::Writer,
+        Config, Exporter, Options, TXT, app::export_type::ExportType,
+        exporters::exporter::MessageFormatter,
     };
 
     #[test]
@@ -2614,12 +2812,15 @@ mod edited_tests {
         tables::messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
     };
 
-    use crate::{Config, Exporter, Options, TXT, exporters::exporter::Writer};
+    use crate::{
+        Config, Exporter, Options, TXT, app::export_type::ExportType::Txt,
+        exporters::exporter::MessageFormatter,
+    };
 
     #[test]
     fn can_format_txt_conversion_final_unsent() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2675,7 +2876,7 @@ mod edited_tests {
     #[test]
     fn can_format_txt_conversion_no_edits() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
@@ -2710,7 +2911,7 @@ mod edited_tests {
     #[test]
     fn can_format_txt_conversion_fully_unsent() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Txt);
+        let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 

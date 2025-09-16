@@ -13,6 +13,7 @@ use crate::{
 };
 use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 
+// MARK: Struct
 /// Represents a single row in the `chat_handle_join` table.
 pub struct ChatToHandle {
     chat_id: i32,
@@ -27,7 +28,7 @@ impl Table for ChatToHandle {
         })
     }
 
-    fn get(db: &Connection) -> Result<CachedStatement, TableError> {
+    fn get(db: &'_ Connection) -> Result<CachedStatement<'_>, TableError> {
         Ok(db.prepare_cached(&format!("SELECT * FROM {CHAT_HANDLE_JOIN}"))?)
     }
 
@@ -39,6 +40,7 @@ impl Table for ChatToHandle {
     }
 }
 
+// MARK: Cache
 impl Cacheable for ChatToHandle {
     type K = i32;
     type V = BTreeSet<i32>;
@@ -123,6 +125,7 @@ impl Deduplicate for ChatToHandle {
     }
 }
 
+// MARK: Diagnostic
 impl Diagnostic for ChatToHandle {
     /// Emit diagnostic data for the Chat to Handle join table
     ///
@@ -181,6 +184,7 @@ impl Diagnostic for ChatToHandle {
     }
 }
 
+// MARK: Tests
 #[cfg(test)]
 mod tests {
     use crate::tables::{chat_handle::ChatToHandle, table::Deduplicate};

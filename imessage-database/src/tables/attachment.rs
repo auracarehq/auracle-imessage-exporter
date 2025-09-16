@@ -7,6 +7,7 @@ use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 use sha1::{Digest, Sha1};
 
 use std::{
+    fmt::Write,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -30,10 +31,12 @@ use crate::{
     },
 };
 
+// MARK: Constants
 /// The default root directory for iMessage attachment data
 pub const DEFAULT_ATTACHMENT_ROOT: &str = "~/Library/Messages/Attachments";
 const COLS: &str = "a.rowid, a.filename, a.uti, a.mime_type, a.transfer_name, a.total_bytes, a.is_sticker, a.hide_attachment, a.emoji_image_short_description";
 
+// MARK: MediaType
 /// Represents the [MIME type](https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_Types) of a message's attachment data
 ///
 /// The interior `str` contains the subtype, i.e. `x-m4a` for `audio/x-m4a`
@@ -104,6 +107,7 @@ pub struct Attachment {
     pub copied_path: Option<PathBuf>,
 }
 
+// MARK: Table
 impl Table for Attachment {
     fn from_row(row: &Row) -> Result<Attachment> {
         Ok(Attachment {
@@ -120,7 +124,7 @@ impl Table for Attachment {
         })
     }
 
-    fn get(db: &Connection) -> Result<CachedStatement, TableError> {
+    fn get(db: &'_ Connection) -> Result<CachedStatement<'_>, TableError> {
         Ok(db.prepare_cached(&format!("SELECT * from {ATTACHMENT}"))?)
     }
 
@@ -132,10 +136,11 @@ impl Table for Attachment {
     }
 }
 
+// MARK: Impl
 impl Attachment {
     /// Gets a Vector of attachments associated with a single message
     ///
-    /// The order of the attachments aligns with the order of the [`BubbleComponent::Attachment`](crate::tables::messages::models::BubbleComponent::Attachment)s in the message's [`body()`](crate::tables::table::AttributedBody).
+    /// The order of the attachments aligns with the order of the [`BubbleComponent::Attachment`](crate::tables::messages::models::BubbleComponent::Attachment)s in the message's [`body()`](crate::tables::messages::message::Message::attributed_body).
     pub fn from_message(db: &Connection, msg: &Message) -> Result<Vec<Attachment>, TableError> {
         let mut out_l = vec![];
         if msg.has_attachments() {
@@ -299,16 +304,21 @@ impl Attachment {
 
             statement.push_str(" WHERE ");
             if let Some(start) = context.start {
-                statement.push_str(&format!(
+                let _ = write!(
+                    statement,
                     "    a.created_date >= {}",
                     start / TIMESTAMP_FACTOR
-                ));
+                );
             }
             if let Some(end) = context.end {
                 if context.start.is_some() {
                     statement.push_str(" AND ");
                 }
-                statement.push_str(&format!("    a.created_date <= {}", end / TIMESTAMP_FACTOR));
+                let _ = write!(
+                    statement,
+                    "    a.created_date <= {}",
+                    end / TIMESTAMP_FACTOR
+                );
             }
 
             db.prepare(&statement)?
@@ -521,6 +531,7 @@ impl Attachment {
     }
 }
 
+// MARK: Tests
 #[cfg(test)]
 mod tests {
     use crate::{

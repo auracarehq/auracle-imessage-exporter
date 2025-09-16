@@ -11,6 +11,7 @@ use imessage_database::{
         handwriting::HandwrittenMessage,
         music::MusicMessage,
         placemark::PlacemarkMessage,
+        polls::Poll,
         text_effects::{Animation, Style, TextEffect, Unit},
         url::URLMessage,
     },
@@ -27,6 +28,7 @@ use crate::app::{error::RuntimeError, runtime::Config};
 
 pub(crate) const ATTACHMENT_NO_FILENAME: &str = "Attachment missing name metadata!";
 
+// MARK: Exporter
 /// Defines behavior for iterating over messages from the iMessage database and managing export files
 pub trait Exporter<'a> {
     /// Create a new exporter with references to the cached data
@@ -40,10 +42,13 @@ pub trait Exporter<'a> {
         &mut self,
         message: &Message,
     ) -> Result<&mut BufWriter<File>, RuntimeError>;
+    /// Write formatted text to a file
+    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError>;
 }
 
+// MARK: Message
 /// Defines behavior for formatting message instances to the desired output format
-pub(super) trait Writer<'a> {
+pub(super) trait MessageFormatter<'a> {
     /// Format a message, including its tapbacks and replies
     fn format_message(&self, msg: &Message, indent: usize) -> Result<String, TableError>;
     /// Format an attachment, possibly by reading the disk
@@ -82,9 +87,9 @@ pub(super) trait Writer<'a> {
     ) -> Option<String>;
     /// Format all [`TextAttributes`]s applied to a given set of text
     fn format_attributes(&'a self, text: &'a str, attributes: &'a [TextAttributes]) -> String;
-    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError>;
 }
 
+// MARK: Balloon
 /// Defines behavior for formatting custom balloons to the desired output format
 pub(super) trait BalloonFormatter<T> {
     /// Format a URL message
@@ -111,6 +116,8 @@ pub(super) trait BalloonFormatter<T> {
     fn format_find_my(&self, balloon: &AppMessage, indent: T) -> String;
     /// Format a Check In message
     fn format_check_in(&self, balloon: &AppMessage, indent: T) -> String;
+    /// Format a Poll message
+    fn format_poll(&self, poll: &Poll, indent: T) -> String;
     /// Format a generic app, generally third party
     fn format_generic_app(
         &self,
@@ -121,6 +128,7 @@ pub(super) trait BalloonFormatter<T> {
     ) -> String;
 }
 
+// MARK: Text Effects
 /// Defines behavior for applying a [`TextEffect`] to the desired output format
 pub(super) trait TextEffectFormatter<'a> {
     /// Format a specific [`TextEffect`]

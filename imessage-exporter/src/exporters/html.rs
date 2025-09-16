@@ -8,6 +8,7 @@ use std::{
         HashMap,
         hash_map::Entry::{Occupied, Vacant},
     },
+    fmt::Write as FmtWrite,
     fs::File,
     io::{BufWriter, Write},
 };
@@ -18,7 +19,7 @@ use crate::{
         progress::ExportProgress, runtime::Config, sanitizers::sanitize_html,
     },
     exporters::exporter::{
-        ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, TextEffectFormatter, Writer,
+        ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, MessageFormatter, TextEffectFormatter,
     },
 };
 
@@ -34,6 +35,7 @@ use imessage_database::{
         handwriting::HandwrittenMessage,
         music::MusicMessage,
         placemark::PlacemarkMessage,
+        polls::Poll,
         sticker::StickerSource,
         text_effects::{Animation, Style, TextEffect, Unit},
         url::URLMessage,
@@ -56,6 +58,7 @@ use imessage_database::{
     },
 };
 
+// MARK: HTML
 const HEADER: &str = "<html>\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
 const FOOTER: &str = "</body></html>";
 const STYLE: &str = include_str!("resources/style.css");
@@ -82,6 +85,7 @@ pub struct HTML<'a> {
     pb: ExportProgress,
 }
 
+// MARK: Exporter
 impl<'a> Exporter<'a> for HTML<'a> {
     fn new(config: &'a Config) -> Result<Self, RuntimeError> {
         let mut orphaned = config.options.export_path.clone();
@@ -142,8 +146,8 @@ impl<'a> Exporter<'a> for HTML<'a> {
                 let announcement = self.format_announcement(&msg);
                 HTML::write_to_file(self.get_or_create_file(&msg)?, &announcement)?;
             }
-            // Message replies and tapbacks are rendered in context, so no need to render them separately
-            else if !msg.is_tapback() {
+            // Message tapbacks and poll votes are rendered in context, so no need to render them separately
+            else if !msg.is_tapback() && !msg.is_poll_vote() && !msg.is_poll_update() {
                 let message = self.format_message(&msg, 0)?;
                 HTML::write_to_file(self.get_or_create_file(&msg)?, &message)?;
             }
@@ -198,12 +202,18 @@ impl<'a> Exporter<'a> for HTML<'a> {
             None => Ok(&mut self.orphaned),
         }
     }
+
+    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
+        file.write_all(text.as_bytes())
+            .map_err(RuntimeError::DiskError)
+    }
 }
 
-impl<'a> Writer<'a> for HTML<'a> {
+// MARK: Writer
+impl<'a> MessageFormatter<'a> for HTML<'a> {
     fn format_message(&self, message: &Message, indent_size: usize) -> Result<String, TableError> {
         // Data we want to write to a file
-        let mut formatted_message = String::new();
+        let mut formatted_message = String::with_capacity(1024);
 
         // Message div
         if message.is_reply() && indent_size == 0 {
@@ -294,7 +304,6 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
 
         // Useful message metadata
-        let message_parts = &message.components;
         let mut attachments = Attachment::from_message(self.config.db(), message)?;
         let mut replies = message.get_replies(self.config.db())?;
 
@@ -333,7 +342,7 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
 
         // Generate the message body from it's components
-        for (idx, message_part) in message_parts.iter().enumerate() {
+        for (idx, message_part) in message.components.iter().enumerate() {
             // Write the part div start
             self.add_line(
                 &mut formatted_message,
@@ -347,17 +356,16 @@ impl<'a> Writer<'a> for HTML<'a> {
                     if let Some(text) = &message.text {
                         // Render edited message content, if applicable
                         if message.is_part_edited(idx) {
-                            if let Some(edited_parts) = &message.edited_parts {
-                                if let Some(edited) =
+                            if let Some(edited_parts) = &message.edited_parts
+                                && let Some(edited) =
                                     self.format_edited(message, edited_parts, idx, "")
-                                {
-                                    self.add_line(
-                                        &mut formatted_message,
-                                        &edited,
-                                        "<div class=\"edited\">",
-                                        "</div>",
-                                    );
-                                }
+                            {
+                                self.add_line(
+                                    &mut formatted_message,
+                                    &edited,
+                                    "<div class=\"edited\">",
+                                    "</div>",
+                                );
                             }
                         } else {
                             let mut formatted_text = self.format_attributes(text, text_attrs);
@@ -367,13 +375,27 @@ impl<'a> Writer<'a> for HTML<'a> {
                                 formatted_text.push_str(&sanitize_html(text));
                             }
 
-                            // Render the message body if the message or message part was not edited
-                            // If it was edited, it was rendered already
-                            // if match &edited_parts {
-                            //     Some(edited_parts) => edited_parts.is_unedited_at(idx),
-                            //     None => !message.is_edited(),
-                            // } {
-                            if formatted_text.starts_with(FITNESS_RECEIVER) {
+                            // Check if the message was translated
+                            if self.config.translated_messages.contains(&message.guid)
+                                && let Ok(Some(translation)) =
+                                    message.get_translation(self.config.db())
+                            {
+                                // Render the translated text as the message body
+                                self.add_line(
+                                    &mut formatted_message,
+                                    &translation.translated_text,
+                                    "<span class=\"bubble\">",
+                                    "</span>",
+                                );
+                                // Then, render the original message that the system translated
+                                self.add_line(
+                                    &mut formatted_message,
+                                    &formatted_text,
+                                    "<div class=\"translated\"><span class=\"bubble\">",
+                                    "</span></div>",
+                                );
+                            } else if formatted_text.starts_with(FITNESS_RECEIVER) {
+                                // Fitness messages have a prefix that we need to replace with the opposite if who sent the message
                                 self.add_line(
                                     &mut formatted_message,
                                     &formatted_text.replace(FITNESS_RECEIVER, YOU),
@@ -405,7 +427,6 @@ impl<'a> Writer<'a> for HTML<'a> {
                             } else {
                                 match self.format_attachment(attachment, message, metadata) {
                                     Ok(result) => {
-                                        attachment_index += 1;
                                         self.add_line(
                                             &mut formatted_message,
                                             &result,
@@ -415,13 +436,14 @@ impl<'a> Writer<'a> for HTML<'a> {
                                     }
                                     Err(result) => {
                                         self.add_line(
-                                        &mut formatted_message,
-                                        result,
-                                        "<span class=\"attachment_error\">Unable to locate attachment: ",
-                                        "</span>",
-                                    );
+                                            &mut formatted_message,
+                                            result,
+                                            "<span class=\"attachment_error\">Unable to locate attachment: ",
+                                            "</span>",
+                                        );
                                     }
                                 }
+                                attachment_index += 1;
                             }
                         }
                         // Attachment does not exist in attachments table
@@ -448,15 +470,15 @@ impl<'a> Writer<'a> for HTML<'a> {
                     ),
                 },
                 BubbleComponent::Retracted => {
-                    if let Some(edited_parts) = &message.edited_parts {
-                        if let Some(edited) = self.format_edited(message, edited_parts, idx, "") {
-                            self.add_line(
-                                &mut formatted_message,
-                                &edited,
-                                "<span class=\"unsent\">",
-                                "</span>",
-                            );
-                        }
+                    if let Some(edited_parts) = &message.edited_parts
+                        && let Some(edited) = self.format_edited(message, edited_parts, idx, "")
+                    {
+                        self.add_line(
+                            &mut formatted_message,
+                            &edited,
+                            "<span class=\"unsent\">",
+                            "</span>",
+                        );
                     }
                 }
             }
@@ -475,36 +497,36 @@ impl<'a> Writer<'a> for HTML<'a> {
             }
 
             // Handle Tapbacks
-            if let Some(tapbacks_map) = self.config.tapbacks.get(&message.guid) {
-                if let Some(tapbacks) = tapbacks_map.get(&idx) {
-                    let mut formatted_tapbacks = String::new();
+            if let Some(tapbacks_map) = self.config.tapbacks.get(&message.guid)
+                && let Some(tapbacks) = tapbacks_map.get(&idx)
+            {
+                let mut formatted_tapbacks = String::new();
 
-                    tapbacks
-                        .iter()
-                        .try_for_each(|tapback| -> Result<(), TableError> {
-                            let formatted = self.format_tapback(tapback)?;
-                            if !formatted.is_empty() {
-                                self.add_line(
-                                    &mut formatted_tapbacks,
-                                    &self.format_tapback(tapback)?,
-                                    "<div class=\"tapback\">",
-                                    "</div>",
-                                );
-                            }
-                            Ok(())
-                        })?;
+                tapbacks
+                    .iter()
+                    .try_for_each(|tapback| -> Result<(), TableError> {
+                        let formatted = self.format_tapback(tapback)?;
+                        if !formatted.is_empty() {
+                            self.add_line(
+                                &mut formatted_tapbacks,
+                                &self.format_tapback(tapback)?,
+                                "<div class=\"tapback\">",
+                                "</div>",
+                            );
+                        }
+                        Ok(())
+                    })?;
 
-                    if !formatted_tapbacks.is_empty() {
-                        self.add_line(
-                            &mut formatted_message,
-                            "<hr><p>Tapbacks:</p>",
-                            "<div class=\"tapbacks\">",
-                            "",
-                        );
-                        self.add_line(&mut formatted_message, &formatted_tapbacks, "", "");
-                    }
-                    self.add_line(&mut formatted_message, "</div>", "", "");
+                if !formatted_tapbacks.is_empty() {
+                    self.add_line(
+                        &mut formatted_message,
+                        "<hr><p>Tapbacks:</p>",
+                        "<div class=\"tapbacks\">",
+                        "",
+                    );
+                    self.add_line(&mut formatted_message, &formatted_tapbacks, "", "");
                 }
+                self.add_line(&mut formatted_message, "</div>", "", "");
             }
 
             // Handle Replies
@@ -647,9 +669,10 @@ impl<'a> Writer<'a> for HTML<'a> {
                         StickerSource::Genmoji => {
                             // Add sticker prompt
                             if let Some(prompt) = &sticker.emoji_description {
-                                sticker_embed.push_str(&format!(
+                                let _ = write!(
+                                    sticker_embed,
                                     "\n<div class=\"genmoji_prompt\">Genmoji prompt: {prompt}</div>"
-                                ));
+                                );
                             }
                         }
                         StickerSource::Memoji => sticker_embed
@@ -661,9 +684,10 @@ impl<'a> Writer<'a> for HTML<'a> {
                                 &self.config.options.db_path,
                                 self.config.options.attachment_root.as_deref(),
                             ) {
-                                sticker_embed.push_str(&format!(
+                                let _ = write!(
+                                    sticker_embed,
                                     "\n<div class=\"sticker_effect\">Sent with {sticker_effect} effect</div>"
-                                ));
+                                );
                             }
                         }
                         StickerSource::App(bundle_id) => {
@@ -671,9 +695,10 @@ impl<'a> Writer<'a> for HTML<'a> {
                             let app_name = sticker
                                 .get_sticker_source_application_name(self.config.db())
                                 .unwrap_or(bundle_id);
-                            sticker_embed.push_str(&format!(
+                            let _ = write!(
+                                sticker_embed,
                                 "\n<div class=\"sticker_name\">App: {app_name}</div>"
-                            ));
+                            );
                         }
                     }
                 }
@@ -694,22 +719,31 @@ impl<'a> Writer<'a> for HTML<'a> {
             let mut app_bubble = String::new();
 
             // Handwritten messages use a different payload type, so check that first
-            if message.is_handwriting() {
-                if let Some(payload) = message.raw_payload_data(self.config.db()) {
-                    return match HandwrittenMessage::from_payload(&payload) {
-                        Ok(bubble) => Ok(self.format_handwriting(message, &bubble, message)),
-                        Err(why) => Err(PlistParseError::HandwritingError(why)),
-                    };
-                }
+            if message.is_handwriting()
+                && let Some(payload) = message.raw_payload_data(self.config.db())
+            {
+                return match HandwrittenMessage::from_payload(&payload) {
+                    Ok(bubble) => Ok(self.format_handwriting(message, &bubble, message)),
+                    Err(why) => Err(PlistParseError::HandwritingError(why)),
+                };
             }
 
-            if message.is_digital_touch() {
-                if let Some(payload) = message.raw_payload_data(self.config.db()) {
-                    return match digital_touch::from_payload(&payload) {
-                        Some(bubble) => Ok(self.format_digital_touch(message, &bubble, message)),
-                        None => Err(PlistParseError::DigitalTouchError),
-                    };
-                }
+            if message.is_digital_touch()
+                && let Some(payload) = message.raw_payload_data(self.config.db())
+            {
+                return match digital_touch::from_payload(&payload) {
+                    Some(bubble) => Ok(self.format_digital_touch(message, &bubble, message)),
+                    None => Err(PlistParseError::DigitalTouchError),
+                };
+            }
+
+            // Poll messages use a different payload type
+            if message.is_poll() {
+                let poll = message.as_poll(self.config.db())?;
+                return match poll {
+                    Some(poll) => Ok(self.format_poll(&poll, message)),
+                    None => Err(PlistParseError::WrongMessageType),
+                };
             }
 
             if let Some(payload) = message.payload_data(self.config.db()) {
@@ -739,9 +773,12 @@ impl<'a> Writer<'a> for HTML<'a> {
                             CustomBalloon::Slideshow => self.format_slideshow(&bubble, message),
                             CustomBalloon::CheckIn => self.format_check_in(&bubble, message),
                             CustomBalloon::FindMy => self.format_find_my(&bubble, message),
-                            CustomBalloon::Handwriting => unreachable!(),
-                            CustomBalloon::DigitalTouch => unreachable!(),
-                            CustomBalloon::URL => unreachable!(),
+                            CustomBalloon::Polls
+                            | CustomBalloon::Handwriting
+                            | CustomBalloon::DigitalTouch
+                            | CustomBalloon::URL => {
+                                unreachable!()
+                            }
                         },
                         Err(why) => return Err(why),
                     }
@@ -749,23 +786,23 @@ impl<'a> Writer<'a> for HTML<'a> {
                 app_bubble.push_str(&res);
             } else {
                 // Sometimes, URL messages are missing their payloads
-                if message.is_url() {
-                    if let Some(text) = &message.text {
-                        let mut out_s = String::new();
-                        out_s.push_str("<a href=\"");
-                        out_s.push_str(text);
-                        out_s.push_str("\">");
+                if message.is_url()
+                    && let Some(text) = &message.text
+                {
+                    let mut out_s = String::new();
+                    out_s.push_str("<a href=\"");
+                    out_s.push_str(text);
+                    out_s.push_str("\">");
 
-                        out_s.push_str("<div class=\"app_header\"><div class=\"name\">");
-                        out_s.push_str(text);
-                        out_s.push_str("</div></div>");
+                    out_s.push_str("<div class=\"app_header\"><div class=\"name\">");
+                    out_s.push_str(text);
+                    out_s.push_str("</div></div>");
 
-                        out_s.push_str("<div class=\"app_footer\"><div class=\"caption\">");
-                        out_s.push_str(text);
-                        out_s.push_str("</div></div></a>");
+                    out_s.push_str("<div class=\"app_footer\"><div class=\"caption\">");
+                    out_s.push_str(text);
+                    out_s.push_str("</div></div></a>");
 
-                        return Ok(out_s);
-                    }
+                    return Ok(out_s);
                 }
                 return Err(PlistParseError::NoPayload);
             }
@@ -882,6 +919,12 @@ impl<'a> Writer<'a> for HTML<'a> {
                         GroupAction::ParticipantLeft => "left the conversation.".to_string(),
                         GroupAction::GroupIconChanged => "changed the group photo.".to_string(),
                         GroupAction::GroupIconRemoved => "removed the group photo.".to_string(),
+                        GroupAction::ChatBackgroundChanged => {
+                            "changed the chat background.".to_string()
+                        }
+                        GroupAction::ChatBackgroundRemoved => {
+                            "removed the chat background.".to_string()
+                        }
                     },
                     Announcement::AudioMessageKept => "kept an audio message.".to_string(),
                     Announcement::FullyUnsent => "unsent a message.".to_string(),
@@ -979,14 +1022,16 @@ impl<'a> Writer<'a> for HTML<'a> {
                         msg.date_edited(&self.config.offset),
                     ) {
                         Some(diff) => {
-                            out_s.push_str(&format!(
+                            let _ = write!(
+                                out_s,
                                 "<span class=\"unsent\">{who} unsent this message part {diff} after sending!</span>"
-                            ));
+                            );
                         }
                         None => {
-                            out_s.push_str(&format!(
+                            let _ = write!(
+                                out_s,
                                 "<span class=\"unsent\">{who} unsent this message part!</span>"
-                            ));
+                            );
                         }
                     }
                 }
@@ -1054,13 +1099,9 @@ impl<'a> Writer<'a> for HTML<'a> {
         }
         result
     }
-
-    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
-        file.write_all(text.as_bytes())
-            .map_err(RuntimeError::DiskError)
-    }
 }
 
+// MARK: Balloons
 impl<'a> BalloonFormatter<&'a Message> for HTML<'a> {
     fn format_url(&self, msg: &Message, balloon: &URLMessage, _: &Message) -> String {
         let mut out_s = String::new();
@@ -1545,6 +1586,62 @@ impl<'a> BalloonFormatter<&'a Message> for HTML<'a> {
         out_s
     }
 
+    fn format_poll(&self, poll: &Poll, _: &'a Message) -> String {
+        let mut out_s = String::new();
+
+        // Calculate max votes for scaling the bars
+        let max_votes = poll
+            .order
+            .iter()
+            .filter_map(|option_id| poll.options.get(option_id))
+            .map(|option| option.votes.len())
+            .max()
+            .unwrap_or(0);
+
+        // Start the poll container
+        out_s.push_str("<div class=\"poll-container\">");
+
+        for poll_option in &poll.order {
+            if let Some(option) = poll.options.get(poll_option) {
+                let vote_count = option.votes.len();
+                let bar_width = if max_votes > 0 {
+                    (vote_count * 100) / max_votes
+                } else {
+                    0
+                };
+
+                out_s.push_str("<div class=\"poll-option\">");
+
+                // Option header with name and vote count
+                out_s.push_str(&format!(
+                    "<div class=\"option-header\"><span>{}</span><span class=\"vote-count\">{}</span></div>",
+                    option.text, vote_count
+                ));
+
+                // Vote bar visualization
+                out_s.push_str("<div class=\"vote-bar-container\">");
+                out_s.push_str(&format!(
+                    "<div class=\"vote-bar\" style=\"width: {bar_width}%;\"></div>"
+                ));
+                out_s.push_str("</div>");
+
+                // List of voters
+                if !option.votes.is_empty() {
+                    out_s.push_str("<div class=\"voters-list\">");
+                    for vote in &option.votes {
+                        out_s.push_str(&format!("<span class=\"voter\">{}</span>", vote.voter));
+                    }
+                    out_s.push_str("</div>");
+                }
+
+                out_s.push_str("</div>");
+            }
+        }
+
+        out_s.push_str("</div>");
+        out_s
+    }
+
     fn format_generic_app(
         &self,
         balloon: &AppMessage,
@@ -1556,6 +1653,7 @@ impl<'a> BalloonFormatter<&'a Message> for HTML<'a> {
     }
 }
 
+// MARK: Text Effects
 impl<'a> TextEffectFormatter<'a> for HTML<'a> {
     fn format_effect(&'a self, text: &'a str, effect: &'a TextEffect) -> Cow<'a, str> {
         match effect {
@@ -1609,20 +1707,21 @@ impl<'a> TextEffectFormatter<'a> for HTML<'a> {
     }
 }
 
+// MARK: Impl
 impl HTML<'_> {
     fn get_time(&self, message: &Message) -> (String, String) {
         let date = format(&message.date(&self.config.offset));
         let mut read_at = String::new();
         let read_after = message.time_until_read(&self.config.offset);
-        if let Some(time) = read_after {
-            if !time.is_empty() {
-                let who = if message.is_from_me() {
-                    "them"
-                } else {
-                    self.config.options.custom_name.as_deref().unwrap_or("you")
-                };
-                read_at = format!("(Read by {who} after {time})");
-            }
+        if let Some(time) = read_after
+            && !time.is_empty()
+        {
+            let who = if message.is_from_me() {
+                "them"
+            } else {
+                self.config.options.custom_name.as_deref().unwrap_or("you")
+            };
+            read_at = format!("(Read by {who} after {time})");
         }
         (date, read_at)
     }
@@ -1789,6 +1888,7 @@ impl HTML<'_> {
     }
 }
 
+// MARK: Tests
 #[cfg(test)]
 mod tests {
     use std::{env::current_dir, path::PathBuf};
@@ -1796,7 +1896,7 @@ mod tests {
     use crate::{
         Config, Exporter, HTML, Options,
         app::{compatibility::attachment_manager::AttachmentManagerMode, export_type::ExportType},
-        exporters::exporter::Writer,
+        exporters::exporter::MessageFormatter,
     };
     use imessage_database::{
         message_types::text_effects::TextEffect,
@@ -2245,6 +2345,52 @@ mod tests {
 
         let actual = exporter.format_announcement(&message);
         let expected = "\n<div class =\"announcement\"><p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span> You changed the group photo.</p></div>\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_chat_background_removed() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+        message.group_action_type = 6;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "\n<div class =\"announcement\"><p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span> You removed the chat background.</p></div>\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_html_chat_background_added() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, ME.to_string());
+
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = true;
+        message.item_type = 3;
+        message.group_action_type = 4;
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "\n<div class =\"announcement\"><p><span class=\"timestamp\">May 17, 2022  5:29:42 PM</span> You changed the chat background.</p></div>\n";
 
         assert_eq!(actual, expected);
     }
@@ -2842,24 +2988,54 @@ mod tests {
             "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=FAKEGUID-D0C8-4212-AA87-DD8AE4FD1203\">May 17, 2022  5:29:42 PM</a> </span>\n<span class=\"sender\">Unknown</span></p>\n<hr><div class=\"message_part\">\n<div class=\"app\"><a href=\"https://www.ghacks.net/2020/01/23/lastpass-no-longer-listed-on-the-chrome-web-store/\"><div class=\"app_header\"><img src=\"https://www.ghacks.net/wp-content/uploads/2020/01/lastpass-chrome-extension.png\" loading=\"lazy\", onerror=\"this.style.display='none'\"><div class=\"name\">gHacks Technology News</div></div><div class=\"app_footer\"><div class=\"caption\">LastPass no longer listed on the Chrome Web Store - gHacks Tech News</div><div class=\"subcaption\">LastPass customers and new users searching for password managers on Google&apos;s Chrome Web Store may have noticed that the LastPass extension for Google Chrome is currently no longer listed on the store.</div></div></a></div>\n</div>\n</div>\n</div>\n"
         );
     }
+
+    #[test]
+    fn can_format_html_translated_message() {
+        // Create exporter
+        let mut options = Options::fake_options(ExportType::Html);
+        options.attachment_manager.mode = AttachmentManagerMode::Clone;
+
+        let mut config = Config::fake_app(options);
+        config
+            .translated_messages
+            .insert("56FE94B9-2345-4A3C-A57F-949BDDDDF9FF".to_string());
+
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.guid = "56FE94B9-2345-4A3C-A57F-949BDDDDF9FF".to_string();
+        message.rowid = 548216;
+        message.generate_text_legacy(config.db()).unwrap();
+
+        let actual = exporter.format_message(&message, 0).unwrap();
+        let expected = "<div class=\"message\">\n<div class=\"received\">\n<p><span class=\"timestamp\"><a title=\"Reveal in Messages app\" href=\"sms://open?message-guid=56FE94B9-2345-4A3C-A57F-949BDDDDF9FF\">Dec 31, 2000  4:00:00 PM</a> </span>\n<span class=\"sender\">Unknown</span></p>\n<hr><div class=\"message_part\">\n<span class=\"bubble\">Oh, il a traduit ce que j'ai envoyé !</span>\n<div class=\"translated\"><span class=\"bubble\">Oh it translated what I sent!</span></div>\n</div>\n</div>\n</div>\n";
+
+        assert_eq!(actual, expected);
+    }
 }
 
 #[cfg(test)]
 mod balloon_format_tests {
-    use crate::{Config, Exporter, HTML, Options, exporters::exporter::BalloonFormatter};
+    use std::collections::HashMap;
+
+    use crate::{
+        Config, Exporter, HTML, Options, app::export_type::ExportType::Html,
+        exporters::exporter::BalloonFormatter,
+    };
     use imessage_database::message_types::{
         app::AppMessage,
         app_store::AppStoreMessage,
         collaboration::CollaborationMessage,
         music::MusicMessage,
         placemark::{Placemark, PlacemarkMessage},
+        polls::{Poll, PollOption, PollOptionID, PollVote},
         url::URLMessage,
     };
 
     #[test]
     fn can_format_html_url() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -2885,7 +3061,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_url_no_lazy() {
         // Create exporter
-        let mut options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let mut options = Options::fake_options(Html);
         options.no_lazy = true;
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
@@ -2912,7 +3088,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_music() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -2934,7 +3110,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_music_lyrics() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -2956,7 +3132,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_collaboration() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -2978,7 +3154,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_apple_pay() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3004,7 +3180,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_fitness() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3030,7 +3206,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_slideshow() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3056,7 +3232,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_find_my() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3082,7 +3258,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_check_in_timer() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3108,7 +3284,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_check_in_timer_late() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3134,7 +3310,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_accepted_check_in() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3160,7 +3336,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_app_store() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3182,7 +3358,7 @@ mod balloon_format_tests {
     #[test]
     fn can_format_html_placemark() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3211,9 +3387,75 @@ mod balloon_format_tests {
     }
 
     #[test]
+    fn can_format_html_poll() {
+        // Create exporter
+        let options = Options::fake_options(Html);
+        let config = Config::fake_app(options);
+        let exporter = HTML::new(&config).unwrap();
+
+        let mut poll_options: HashMap<PollOptionID, PollOption> = HashMap::new();
+
+        let id1: PollOptionID = "1".to_string();
+        let id2: PollOptionID = "2".to_string();
+        let id3: PollOptionID = "3".to_string();
+
+        poll_options.insert(
+            id1.clone(),
+            PollOption {
+                text: "Rust".to_string(),
+                creator: "alice".to_string(),
+                votes: vec![PollVote {
+                    voter: "carol".to_string(),
+                    option_id: id1.clone(),
+                }],
+            },
+        );
+
+        poll_options.insert(
+            id2.clone(),
+            PollOption {
+                text: "Go".to_string(),
+                creator: "bob".to_string(),
+                votes: vec![
+                    PollVote {
+                        voter: "alice".to_string(),
+                        option_id: id2.clone(),
+                    },
+                    PollVote {
+                        voter: "bob".to_string(),
+                        option_id: id2.clone(),
+                    },
+                ],
+            },
+        );
+
+        poll_options.insert(
+            id3.clone(),
+            PollOption {
+                text: "Python".to_string(),
+                creator: "carol".to_string(),
+                votes: vec![PollVote {
+                    voter: "dave".to_string(),
+                    option_id: id3.clone(),
+                }],
+            },
+        );
+
+        let poll = Poll {
+            options: poll_options,
+            order: vec![id1, id2, id3],
+        };
+
+        let expected = exporter.format_poll(&poll, &Config::fake_message());
+        let actual = "<div class=\"poll-container\"><div class=\"poll-option\"><div class=\"option-header\"><span>Rust</span><span class=\"vote-count\">1</span></div><div class=\"vote-bar-container\"><div class=\"vote-bar\" style=\"width: 50%;\"></div></div><div class=\"voters-list\"><span class=\"voter\">carol</span></div></div><div class=\"poll-option\"><div class=\"option-header\"><span>Go</span><span class=\"vote-count\">2</span></div><div class=\"vote-bar-container\"><div class=\"vote-bar\" style=\"width: 100%;\"></div></div><div class=\"voters-list\"><span class=\"voter\">alice</span><span class=\"voter\">bob</span></div></div><div class=\"poll-option\"><div class=\"option-header\"><span>Python</span><span class=\"vote-count\">1</span></div><div class=\"vote-bar-container\"><div class=\"vote-bar\" style=\"width: 50%;\"></div></div><div class=\"voters-list\"><span class=\"voter\">dave</span></div></div></div>";
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
     fn can_format_html_generic_app() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3251,13 +3493,14 @@ mod text_effect_tests {
 
     use crate::{
         Config, Exporter, HTML, Options,
-        exporters::exporter::{TextEffectFormatter, Writer},
+        app::export_type::ExportType::Html,
+        exporters::exporter::{MessageFormatter, TextEffectFormatter},
     };
 
     #[test]
     fn can_format_html_default() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3270,7 +3513,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_mention() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3283,7 +3526,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_link() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3296,7 +3539,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_otp() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3309,7 +3552,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_style_single() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3322,7 +3565,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_style_multiple() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3335,7 +3578,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_style_all() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3356,7 +3599,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_conversion() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3369,7 +3612,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_mention_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3395,7 +3638,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_otp_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3420,7 +3663,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_link_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3448,7 +3691,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_conversion_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3474,7 +3717,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_effect_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3510,7 +3753,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styles_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3551,7 +3794,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styles_single_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3582,7 +3825,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styles_mixed_end_to_end() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3609,7 +3852,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styled_plain_link() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3641,7 +3884,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styled_emoji_bold_underline() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3668,7 +3911,7 @@ mod text_effect_tests {
     #[test]
     fn can_format_html_text_styled_overlapping_ranges() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3719,7 +3962,10 @@ mod text_effect_tests {
 mod edited_tests {
     use std::{env::current_dir, fs::File, io::Read};
 
-    use crate::{Config, Exporter, HTML, Options, exporters::exporter::Writer};
+    use crate::{
+        Config, Exporter, HTML, Options, app::export_type::ExportType::Html,
+        exporters::exporter::MessageFormatter,
+    };
     use imessage_database::{
         message_types::{
             edited::{EditStatus, EditedEvent, EditedMessage, EditedMessagePart},
@@ -3731,7 +3977,7 @@ mod edited_tests {
     #[test]
     fn can_format_html_edited_with_formatting() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3797,7 +4043,7 @@ mod edited_tests {
     #[test]
     fn can_format_html_conversion_final_unsent() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3853,7 +4099,7 @@ mod edited_tests {
     #[test]
     fn can_format_html_conversion_no_edits() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 
@@ -3887,7 +4133,7 @@ mod edited_tests {
     #[test]
     fn can_format_html_conversion_fully_unsent() {
         // Create exporter
-        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let options = Options::fake_options(Html);
         let config = Config::fake_app(options);
         let exporter = HTML::new(&config).unwrap();
 

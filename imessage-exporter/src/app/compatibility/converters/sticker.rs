@@ -41,14 +41,14 @@ pub(crate) fn sticker_copy_convert(
 
         // If the attachment is an animated sticker, attempt to convert it to a gif
         // Fall back to the normal converter if this fails
-        if matches!(output_type, ImageType::Gif) {
-            if let Some(video_converter) = video_converter {
-                if convert_heics(from, &converted_path, video_converter).is_some() {
-                    *to = converted_path;
-                    return Some(MediaType::Image(output_type.to_str()));
-                }
-                eprintln!("Unable to convert {from:?}");
+        if matches!(output_type, ImageType::Gif)
+            && let Some(video_converter) = video_converter
+        {
+            if convert_heics(from, &converted_path, video_converter).is_some() {
+                *to = converted_path;
+                return Some(MediaType::Image(output_type.to_str()));
             }
+            eprintln!("Unable to convert {from:?}");
         }
 
         // Standard `HEIC` converter fallback
@@ -117,11 +117,11 @@ fn convert_heics(from: &Path, to: &Path, video_converter: &VideoConverter) -> Op
     // Directory to store intermediate renders
     let tmp_path = PathBuf::from("/tmp/imessage");
     // Ensure the temp directory tree exists
-    if !tmp_path.exists() {
-        if let Err(why) = create_dir_all(&tmp_path) {
-            eprintln!("Unable to create {tmp_path:?}: {why}");
-            return None;
-        }
+    if !tmp_path.exists()
+        && let Err(why) = create_dir_all(&tmp_path)
+    {
+        eprintln!("Unable to create {tmp_path:?}: {why}");
+        return None;
     }
     let tmp = tmp_path.to_str()?;
 

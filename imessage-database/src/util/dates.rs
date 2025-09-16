@@ -3,6 +3,7 @@
 
  Most dates are stored as nanosecond-precision unix timestamps with an epoch of `1/1/2001 00:00:00` in the local time zone.
 */
+use std::fmt::Write;
 
 use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 
@@ -14,7 +15,7 @@ const SEPARATOR: &str = ", ";
 ///
 /// The iMessage database stores timestamps as nanoseconds, so this factor is used
 /// to convert between the database format and standard Unix timestamps.
-pub const TIMESTAMP_FACTOR: i64 = 1000000000;
+pub const TIMESTAMP_FACTOR: i64 = 1_000_000_000;
 
 /// Get the date offset for the iMessage Database
 ///
@@ -115,7 +116,7 @@ pub fn readable_diff(
             1 => "day",
             _ => "days",
         };
-        out_s.push_str(&format!("{days} {metric}"));
+        let _ = write!(out_s, "{days} {metric}");
     }
     if hours != 0 {
         let metric = match hours {
@@ -125,7 +126,7 @@ pub fn readable_diff(
         if !out_s.is_empty() {
             out_s.push_str(SEPARATOR);
         }
-        out_s.push_str(&format!("{hours} {metric}"));
+        let _ = write!(out_s, "{hours} {metric}");
     }
     if minutes != 0 {
         let metric = match minutes {
@@ -135,7 +136,7 @@ pub fn readable_diff(
         if !out_s.is_empty() {
             out_s.push_str(SEPARATOR);
         }
-        out_s.push_str(&format!("{minutes} {metric}"));
+        let _ = write!(out_s, "{minutes} {metric}");
     }
     if secs != 0 {
         let metric = match secs {
@@ -145,7 +146,7 @@ pub fn readable_diff(
         if !out_s.is_empty() {
             out_s.push_str(SEPARATOR);
         }
-        out_s.push_str(&format!("{secs} {metric}"));
+        let _ = write!(out_s, "{secs} {metric}");
     }
     Some(out_s)
 }

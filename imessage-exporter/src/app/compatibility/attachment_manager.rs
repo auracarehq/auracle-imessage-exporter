@@ -31,6 +31,7 @@ use crate::app::{
     runtime::Config,
 };
 
+// MARK: Manager
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct AttachmentManager {
     pub mode: AttachmentManagerMode,
@@ -75,6 +76,7 @@ impl AttachmentManager {
         }
     }
 
+    // MARK: Handwriting
     /// Handle a handwriting message, optionally writing it to an SVG file
     pub fn handle_handwriting(
         &self,
@@ -101,12 +103,11 @@ impl AttachmentManager {
             }
 
             // Ensure the directory tree exists
-            if let Some(folder) = to.parent() {
-                if !folder.exists() {
-                    if let Err(why) = create_dir_all(folder) {
-                        eprintln!("Unable to create {folder:?}: {why}");
-                    }
-                }
+            if let Some(folder) = to.parent()
+                && !folder.exists()
+                && let Err(why) = create_dir_all(folder)
+            {
+                eprintln!("Unable to create {folder:?}: {why}");
             }
 
             // Attempt the svg render
@@ -122,6 +123,7 @@ impl AttachmentManager {
         None
     }
 
+    // MARK: Files
     /// Handle an attachment, copying and converting if requested
     ///
     /// If copied, update attachment's `copied_path` and `mime_type`
@@ -271,10 +273,8 @@ impl AttachmentManager {
             }
 
             // Remove the temporary file used for decryption, if it exists
-            if is_temp {
-                if let Err(why) = remove_file(&from) {
-                    eprintln!("Unable to remove encrypted file {from:?}: {why}");
-                }
+            if is_temp && let Err(why) = remove_file(&from) {
+                eprintln!("Unable to remove encrypted file {from:?}: {why}");
             }
         }
 
@@ -282,6 +282,7 @@ impl AttachmentManager {
     }
 }
 
+// MARK: Mode
 /// Represents different ways the app can interact with attachment data
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttachmentManagerMode {

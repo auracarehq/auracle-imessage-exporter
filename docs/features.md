@@ -23,6 +23,7 @@ This tool targets the current latest public release for Messages.app. It may wor
   - Detects the service a message was sent from
     - In HTML exports, balloons are colored correctly for the service they were sent with
     - Supports iMessage, SMS, MMS, and RCS
+  - Displays translated message content
 - Formatted Text
   - Parses formatted text ranges from `typedstream` message body data
   - Supports all iMessage text format ranges:
@@ -101,6 +102,7 @@ This tool targets the current latest public release for Messages.app. It may wor
     - SharePlay/Facetime messages
     - Check In messages
     - Find My messages
+    - Polls and Votes
 - Handwritten Messages
   - Parses the protobuf payload to extract [handwritten](https://support.apple.com/en-my/guide/iphone/iph3d4cb79c9/ios) message data
     - Displayed as embedded `svg` in HTML exports
@@ -115,3 +117,8 @@ This tool targets the current latest public release for Messages.app. It may wor
   - On startup:
     - Different handles that belong to the same person are combined
     - Chatrooms that contain identical contacts (i.e., duplicated handles) are combined
+- Announcements
+  - Handles all types of chatroom announcements
+    - Group photo changes
+    - Chat participant modifications
+    - Chat background settings

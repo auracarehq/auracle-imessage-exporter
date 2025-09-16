@@ -44,13 +44,12 @@ pub(super) fn ensure_paths<'a>(from: &'a Path, to: &'a Path) -> Option<(&'a str,
     let to_path = to.to_str()?;
 
     // Ensure the directory tree exists
-    if let Some(folder) = to.parent() {
-        if !folder.exists() {
-            if let Err(why) = create_dir_all(folder) {
-                eprintln!("Unable to create {folder:?}: {why}");
-                return None;
-            }
-        }
+    if let Some(folder) = to.parent()
+        && !folder.exists()
+        && let Err(why) = create_dir_all(folder)
+    {
+        eprintln!("Unable to create {folder:?}: {why}");
+        return None;
     }
     Some((from_path, to_path))
 }
@@ -86,13 +85,12 @@ pub(crate) fn copy_raw(from: &Path, to: &Path) {
         }
     } else {
         // Ensure the directory tree exists
-        if let Some(folder) = to.parent() {
-            if !folder.exists() {
-                if let Err(why) = create_dir_all(folder) {
-                    eprintln!("Unable to create {folder:?}: {why}");
-                    return;
-                }
-            }
+        if let Some(folder) = to.parent()
+            && !folder.exists()
+            && let Err(why) = create_dir_all(folder)
+        {
+            eprintln!("Unable to create {folder:?}: {why}");
+            return;
         }
 
         if let Err(why) = copy(from, to) {

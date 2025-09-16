@@ -167,7 +167,7 @@ fn generate_strokes(svg: &mut String, strokes: &[Vec<Point>]) {
         for (width, points) in &group_points(stroke) {
             let mut points_svg = String::with_capacity(points.len() * 3);
             for point in points {
-                points_svg.push_str(&format!(" {},{}", point.x, point.y));
+                let _ = write!(points_svg, " {},{}", point.x, point.y);
             }
             segments.push_str(
                 format!(

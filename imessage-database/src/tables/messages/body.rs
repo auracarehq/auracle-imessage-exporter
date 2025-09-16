@@ -18,6 +18,7 @@ use crate::{
     },
 };
 
+// MARK: Constants
 /// `NSDictionary` keys that are used to identify attachment metadata
 /// If any of these keys are present in the message body, it is considered an attachment
 /// and the `AttachmentMeta` struct will be populated with the relevant data.
@@ -49,6 +50,7 @@ pub struct ParseResult {
     pub text: Option<String>,
 }
 
+// MARK: Logic
 /// Logic to use deserialized `typedstream` data to parse the message body
 ///
 /// Parses `typedstream` components and optional edited parts into message body components and text.
@@ -295,6 +297,7 @@ fn get_text_effects<'a>(key_name: &'a str, value: &'a mut Property<'a, 'a>) -> R
     RangeResult::Effect(None)
 }
 
+// MARK: Fallback
 /// Fallback logic to parse the body from the message string content
 pub(crate) fn parse_body_legacy(text: &Option<String>) -> Vec<BubbleComponent> {
     let mut out_v = vec![];
@@ -342,10 +345,9 @@ pub(crate) fn parse_body_legacy(text: &Option<String>) -> Vec<BubbleComponent> {
     }
 }
 
+// MARK: TS Test
 #[cfg(test)]
 mod typedstream_tests {
-    // TODO: Fix test structure so we get flat lists again!
-
     use std::{env::current_dir, fs::File, io::Read};
 
     use crabstep::TypedStreamDeserializer;
@@ -1575,6 +1577,7 @@ mod typedstream_tests {
     }
 }
 
+// MARK: Legacy Test
 #[cfg(test)]
 mod legacy_tests {
     use crate::{

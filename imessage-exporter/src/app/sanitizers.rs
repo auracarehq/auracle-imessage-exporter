@@ -44,7 +44,7 @@ pub fn sanitize_filename(filename: &str) -> String {
 }
 
 /// Escapes HTML special characters in the input string, allocating a new string only if necessary.
-pub fn sanitize_html(input: &str) -> Cow<str> {
+pub fn sanitize_html(input: &'_ str) -> Cow<'_, str> {
     for (idx, c) in input.char_indices() {
         if HTML_DISALLOWED_CHARS.contains_key(&c) {
             let mut res = String::from(&input[..idx]);

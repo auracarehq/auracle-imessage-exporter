@@ -69,18 +69,17 @@ impl AppMessage<'_> {
     pub fn parse_query_string(&self) -> HashMap<&str, &str> {
         let mut map = HashMap::new();
 
-        if let Some(url) = self.url {
-            if url.starts_with('?') {
-                let parts = url.strip_prefix('?').unwrap_or(url).split('&');
-                for part in parts {
-                    let key_val_split: Vec<&str> = part.split('=').collect();
-                    if key_val_split.len() == 2 {
-                        map.insert(key_val_split[0], key_val_split[1]);
-                    }
+        if let Some(url) = self.url
+            && url.starts_with('?')
+        {
+            let parts = url.strip_prefix('?').unwrap_or(url).split('&');
+            for part in parts {
+                let key_val_split: Vec<&str> = part.split('=').collect();
+                if key_val_split.len() == 2 {
+                    map.insert(key_val_split[0], key_val_split[1]);
                 }
             }
         }
-
         map
     }
 }
