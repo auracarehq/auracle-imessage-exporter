@@ -78,7 +78,7 @@ pub fn parse_ns_keyed_archiver(plist: &Value) -> Result<Value, PlistParseError> 
 ///
 /// # Parameters
 ///
-/// * `objects` - The array of objects from the `$objects` key in the NSKeyedArchiver format
+/// * `objects` - The array of objects from the `$objects` key in the `NSKeyedArchiver` format
 /// * `root` - The index into the `objects` array to resolve the current object
 /// * `parent` - Optional reference to the parent object in the recursion chain. Used when
 ///   processing dictionary values to provide context for key generation and relative references.
@@ -155,9 +155,9 @@ fn follow_uid<'a>(
                     }
                     // If the value is a pointer, follow it
                     if let Some(idx) = val.as_uid() {
-                        let key_value = Value::String(key.to_string());
+                        let key_value = Value::String(key.clone());
                         dictionary.insert(
-                            key.to_string(),
+                            key.clone(),
                             follow_uid(objects, idx.get() as usize, Some(&key_value), None)?,
                         );
                     }

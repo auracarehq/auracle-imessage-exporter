@@ -127,7 +127,7 @@ use plist::Value;
 use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 
 use crate::{
-    error::{message::MessageError, plist::PlistParseError, table::TableError},
+    error::{message::MessageError, table::TableError},
     message_types::{
         edited::{EditStatus, EditedMessage},
         expressives::{BubbleEffect, Expressive, ScreenEffect},
@@ -817,7 +817,7 @@ impl Message {
     }
 
     /// Generates the [`Translation`] for the current message
-    pub fn get_translation(&self, db: &Connection) -> Result<Option<Translation>, PlistParseError> {
+    pub fn get_translation(&self, db: &Connection) -> Result<Option<Translation>, MessageError> {
         if let Some(payload) = self.message_summary_info(db) {
             return Ok(Some(Translation::from_payload(&payload)?));
         }
@@ -1038,14 +1038,16 @@ impl Message {
 
         // No need to hit the DB if we know we don't have replies
         if self.has_replies() {
-            let filters = format!("WHERE m.thread_originator_guid = \"{}\"", self.guid);
+            // Use a parameterized filter so the prepared statement can be cached/reused
+            let filters = "WHERE m.thread_originator_guid = ?1";
 
             // No iOS 13 and prior used here because `thread_originator_guid` is not present in that schema
             let mut statement = db
-                .prepare(&ios_16_newer_query(Some(&filters)))
-                .or_else(|_| db.prepare(&ios_14_15_query(Some(&filters))))?;
+                .prepare_cached(&ios_16_newer_query(Some(filters)))
+                .or_else(|_| db.prepare_cached(&ios_14_15_query(Some(filters))))?;
 
-            let iter = statement.query_map([], |row| Ok(Message::from_row(row)))?;
+            let iter =
+                statement.query_map([self.guid.as_str()], |row| Ok(Message::from_row(row)))?;
 
             for message in iter {
                 let m = Message::extract(message)?;
@@ -1067,16 +1069,18 @@ impl Message {
     pub fn get_votes(&self, db: &Connection) -> Result<Vec<Self>, TableError> {
         let mut out_v: Vec<Self> = Vec::new();
 
-        // No need to hit the DB if we know we don't have replies
+        // No need to hit the DB if we know we don't have a poll
         if self.is_poll() {
-            let filters = format!("WHERE m.associated_message_guid = \"{}\"", self.guid);
+            // Use a parameterized filter so the prepared statement can be cached/reused
+            let filters = "WHERE m.associated_message_guid = ?1";
 
             // No iOS 13 and prior used here because `associated_message_guid` is not present in that schema
             let mut statement = db
-                .prepare(&ios_16_newer_query(Some(&filters)))
-                .or_else(|_| db.prepare(&ios_14_15_query(Some(&filters))))?;
+                .prepare_cached(&ios_16_newer_query(Some(filters)))
+                .or_else(|_| db.prepare_cached(&ios_14_15_query(Some(filters))))?;
 
-            let iter = statement.query_map([], |row| Ok(Message::from_row(row)))?;
+            let iter =
+                statement.query_map([self.guid.as_str()], |row| Ok(Message::from_row(row)))?;
 
             for message in iter {
                 let m = Message::extract(message)?;
@@ -1088,7 +1092,7 @@ impl Message {
     }
 
     /// If the message is a poll, attempt to parse and return it
-    pub fn as_poll(&self, db: &Connection) -> Result<Option<Poll>, PlistParseError> {
+    pub fn as_poll(&self, db: &Connection) -> Result<Option<Poll>, MessageError> {
         if self.is_poll()
             && let Some(payload) = self.payload_data(db)
         {

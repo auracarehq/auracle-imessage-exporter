@@ -2,7 +2,7 @@
 These are [sticker messages](https://support.apple.com/guide/iphone/send-stickers-iph37b0bfe7b/ios), either from the user's sticker library or sticker apps.
 */
 
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 
 use crate::util::bundle_id::parse_balloon_bundle_id;
 
@@ -54,8 +54,10 @@ impl StickerSource {
 
 /// Represents different types of [sticker effects](https://www.macrumors.com/how-to/add-effects-to-stickers-in-messages/) that can be applied to sticker iMessage balloons.
 #[derive(Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum StickerEffect {
     /// Sticker sent with no effect
+    #[default]
     Normal,
     /// Internally referred to as `stroke`
     Outline,
@@ -83,7 +85,7 @@ impl StickerEffect {
 }
 
 impl Display for StickerEffect {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             StickerEffect::Normal => write!(fmt, "Normal"),
             StickerEffect::Outline => write!(fmt, "Outline"),
@@ -95,11 +97,6 @@ impl Display for StickerEffect {
     }
 }
 
-impl Default for StickerEffect {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// Parse the sticker effect type from the EXIF data of a HEIC blob
 #[must_use]
