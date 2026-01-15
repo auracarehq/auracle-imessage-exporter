@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -9,6 +9,7 @@ use imessage_database::{
 };
 use rusqlite::{Connection, Result};
 
+/// The default contacts file location from the root of an iOS backup
 pub const DEFAULT_PATH_IOS: &str = "31/31bb7ba8914766d4ba40d6dfb6113c8b614be442";
 
 // MARK: Name
@@ -23,6 +24,8 @@ pub struct Name {
     pub full: String,
     /// Combined handle details from iMessage's database
     pub details: String,
+    /// Set of original handle IDs that map to this name
+    pub handle_ids: HashSet<i32>,
 }
 
 impl Name {
@@ -50,6 +53,7 @@ impl Name {
             last: last.unwrap_or_default(),
             full,
             details: String::new(),
+            handle_ids: HashSet::new(),
         })
     }
 
@@ -82,6 +86,7 @@ impl Name {
             last: String::new(),
             full: String::new(),
             details: details.into(),
+            handle_ids: HashSet::new(),
         }
     }
 }
@@ -95,6 +100,7 @@ impl Name {
             last: String::new(),
             full: String::new(),
             details: name.to_string(),
+            handle_ids: HashSet::new(),
         }
     }
 }
@@ -223,11 +229,10 @@ impl ContactsIndex {
         for id_part in id.split_whitespace() {
             if looks_like_email(id_part) {
                 return normalize_email(id_part).and_then(|k| self.index.get(&k).cloned());
-            } else {
-                for k in phone_keys(id_part) {
-                    if let Some(n) = self.index.get(&k) {
-                        return Some(n.clone());
-                    }
+            }
+            for k in phone_keys(id_part) {
+                if let Some(n) = self.index.get(&k) {
+                    return Some(n.clone());
                 }
             }
         }
@@ -244,18 +249,28 @@ impl ContactsIndex {
         participants: &HashMap<i32, String>,
         deduped_handles: &HashMap<i32, i32>,
     ) -> HashMap<i32, Name> {
-        let mut result = HashMap::new();
+        let mut result: HashMap<i32, Name> = HashMap::new();
 
-        for (handle_id, details) in participants {
-            if let Some(deduped_id) = deduped_handles.get(handle_id) {
-                let mut name = self
-                    .lookup(details)
-                    .unwrap_or_else(|| Name::from_details(details.clone()));
+        for (&handle_id, details) in participants {
+            let Some(&deduped_id) = deduped_handles.get(&handle_id) else {
+                continue;
+            };
 
-                // Update details field for the resolved Name
-                name.details = details.clone();
-                result.insert(*deduped_id, name);
-            }
+            result
+                .entry(deduped_id)
+                .and_modify(|name| {
+                    name.handle_ids.insert(handle_id);
+                })
+                .or_insert_with(|| {
+                    let mut name = self
+                        .lookup(details)
+                        .unwrap_or_else(|| Name::from_details(details.clone()));
+
+                    // Keep the original details string for display/fallback
+                    name.details = details.clone();
+                    name.handle_ids.insert(handle_id);
+                    name
+                });
         }
 
         result

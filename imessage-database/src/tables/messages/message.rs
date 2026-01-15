@@ -796,7 +796,7 @@ impl Message {
         self.deleted_from.is_some()
     }
 
-    /// `true` if the message was translated, else `false`
+    /// `true` if the message was translated, else `false`. Only works on iOS 16+ databases.
     pub fn has_translation(&self, db: &Connection) -> bool {
         // `7472616E736C6174696F6E4C616E6775616765` -> "translationLanguage"
         // `7472616E736C6174656454657874` -> "translatedText"
@@ -824,7 +824,7 @@ impl Message {
         Ok(None)
     }
 
-    /// Cache all message GUIDs that contain translation data
+    /// Cache all message GUIDs that contain translation data. Only works on iOS 16+ databases.
     pub fn cache_translations(db: &Connection) -> Result<HashSet<String>, TableError> {
         // `7472616E736C6174696F6E4C616E6775616765` -> "translationLanguage"
         // `7472616E736C6174656454657874` -> "translatedText"
@@ -930,7 +930,7 @@ impl Message {
     /// let context = QueryContext::default();
     /// Message::get_count(&conn, &context);
     /// ```
-    pub fn get_count(db: &Connection, context: &QueryContext) -> Result<u64, TableError> {
+    pub fn get_count(db: &Connection, context: &QueryContext) -> Result<i64, TableError> {
         let mut statement = if context.has_filters() {
             db.prepare_cached(&format!(
                 "SELECT
@@ -955,7 +955,7 @@ impl Message {
             db.prepare_cached(&format!("SELECT COUNT(*) FROM {MESSAGE}"))?
         };
         // Execute query, defaulting to zero if it fails
-        let count: u64 = statement.query_row([], |r| r.get(0)).unwrap_or(0);
+        let count: i64 = statement.query_row([], |r| r.get(0)).unwrap_or(0);
 
         Ok(count)
     }

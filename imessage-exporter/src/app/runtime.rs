@@ -140,12 +140,16 @@ impl Config {
     ///
     /// If it does not, first try and make a flat list of its members. Failing that, use the unique `chat_identifier` field.
     pub fn filename(&self, chatroom: &Chat) -> String {
+        // Calculate effective max length accounting for export path
+        let export_path_len = self.options.export_path.as_os_str().len();
+        let max_len = MAX_LENGTH.saturating_sub(export_path_len + 1);
+
         let mut filename = match &chatroom.display_name() {
             // If there is a display name, use that
             Some(name) => {
                 format!(
                     "{} - {}",
-                    &name[..min(MAX_LENGTH, name.len())],
+                    &name[..min(max_len, name.len())],
                     // Get the deduplicated chat ID to ensure the filename is unique, even if the group name is not
                     self.real_chatrooms
                         .get(&chatroom.rowid)
@@ -181,15 +185,19 @@ impl Config {
     /// - Truncated Names
     ///   - Contact 1, Contact 2, ... Contact 13 and 4 others
     fn filename_from_participants(&self, participants: &BTreeSet<i32>) -> String {
+        // Calculate effective max length accounting for export path
+        let export_path_len = self.options.export_path.as_os_str().len();
+        let max_len = MAX_LENGTH.saturating_sub(export_path_len + 1);
+
         let mut added = 0;
-        let mut out_s = String::with_capacity(MAX_LENGTH);
+        let mut out_s = String::with_capacity(max_len);
         for participant_id in participants {
             let participant_details = match self.resolve_participant(*participant_id) {
                 Some(name) => name.details.as_str(),
                 None => UNKNOWN,
             };
 
-            if participant_details.len() + out_s.len() < MAX_LENGTH {
+            if participant_details.len() + out_s.len() < max_len {
                 if !out_s.is_empty() {
                     out_s.push_str(", ");
                 }
@@ -198,10 +206,10 @@ impl Config {
             } else {
                 let extra = format!(", and {} others", participants.len() - added);
                 let space_remaining = extra.len() + out_s.len();
-                if space_remaining >= MAX_LENGTH {
-                    out_s.replace_range((MAX_LENGTH - extra.len()).., &extra);
+                if space_remaining >= max_len {
+                    out_s.replace_range((max_len - extra.len()).., &extra);
                 } else if out_s.is_empty() {
-                    out_s.push_str(&participant_details[..MAX_LENGTH]);
+                    out_s.push_str(&participant_details[..max_len]);
                 } else {
                     out_s.push_str(&extra);
                 }
@@ -249,7 +257,8 @@ impl Config {
         let tapbacks = Message::cache(data_source.db())?;
 
         eprintln!("  [5/5] Caching translations...");
-        let translated_messages = Message::cache_translations(data_source.db())?;
+        // Translations are not available in older database versions, so we default to an empty set
+        let translated_messages = Message::cache_translations(data_source.db()).unwrap_or_default();
         eprintln!("Cache built!");
 
         Ok(Config {
@@ -279,15 +288,13 @@ impl Config {
             let mut included_handles: BTreeSet<i32> = BTreeSet::new();
 
             // First: Scan the list of participants for included handle IDs
-            self.participants
-                .iter()
-                .for_each(|(handle_id, handle_name)| {
-                    for included_name in &parsed_handle_filter {
-                        if handle_name.contains(included_name) {
-                            included_handles.insert(*handle_id);
-                        }
+            self.participants.iter().for_each(|(_, handle_name)| {
+                for included_name in &parsed_handle_filter {
+                    if handle_name.contains(included_name) {
+                        included_handles.extend(&handle_name.handle_ids);
                     }
-                });
+                }
+            });
 
             // Second: scan the list of chatrooms for IDs that contain the selected participants
             self.chatroom_participants
@@ -713,7 +720,7 @@ mod filename_tests {
 
         // Get filename
         let filename = app.filename_from_participants(&people);
-        assert_eq!(filename, "Person With An Extremely and Excessively Long Name 10, Person With An Extremely and Excessively Long Name 11, Person With An Extremely and Excessively Long Name 12, Person With An Extremely and Excessively Long Name 13, and 4 others".to_string());
+        assert_eq!(filename, "Person With An Extremely and Excessively Long Name 10, Person With An Extremely and Excessively Long Name 11, Person With An Extremely and Excessively Long Name 12, Person With An Extremely and Excessively Long Name , and 4 others".to_string());
         assert!(filename.len() <= MAX_LENGTH);
     }
 
@@ -732,7 +739,7 @@ mod filename_tests {
 
         // Get filename
         let filename = app.filename_from_participants(&people);
-        assert_eq!(filename, "He slipped his key into the lock, and we all very quietly entered the cell. The sleeper half turned, and then settled down once more into a deep slumber. Holmes stooped to the water-jug, moistened his sponge, and then rubbed it twice v".to_string());
+        assert_eq!(filename, "He slipped his key into the lock, and we all very quietly entered the cell. The sleeper half turned, and then settled down once more into a deep slumber. Holmes stooped to the water-jug, moistened his sponge, and then rubbed it tw".to_string());
         assert!(filename.len() <= MAX_LENGTH);
     }
 
@@ -749,7 +756,7 @@ mod filename_tests {
         let filename = app.filename(&chat);
         assert_eq!(
             filename,
-            "Life is infinitely stranger than anything which the mind of man could invent. We would not dare to conceive the things which are really mere commonplaces of existence. If we could fly out of that window hand in hand, hover over this gr - 0.html"
+            "Life is infinitely stranger than anything which the mind of man could invent. We would not dare to conceive the things which are really mere commonplaces of existence. If we could fly out of that window hand in hand, hover over th - 0.html"
         );
     }
 
@@ -1111,6 +1118,11 @@ mod chat_filter_tests {
         app.participants.insert(12, Name::fake_name("Person 12")); // Included
         app.participants.insert(13, Name::fake_name("Person 13")); // Excluded
 
+        // Set the chatroom participant IDs
+        for (id, participant) in app.participants.iter_mut() {
+            participant.handle_ids.insert(*id);
+        }
+
         // Chatroom 1: Included
         let mut chatroom_1 = BTreeSet::new();
         chatroom_1.insert(10);
@@ -1168,6 +1180,11 @@ mod chat_filter_tests {
         app.participants.insert(11, Name::fake_name("Person 11")); // Excluded
         app.participants.insert(12, Name::fake_name("Person 12")); // Excluded
         app.participants.insert(13, Name::fake_name("Person 13")); // Included
+
+        // Set the chatroom participant IDs
+        for (id, participant) in app.participants.iter_mut() {
+            participant.handle_ids.insert(*id);
+        }
 
         // Chatroom 1: Excluded
         let mut chatroom_1 = BTreeSet::new();
