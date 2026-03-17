@@ -32,7 +32,7 @@ pub enum BubbleComponent {
 
 // MARK: Service
 /// Defines different types of [services](https://support.apple.com/en-us/104972) we can receive messages from.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Service<'a> {
     /// An iMessage
     #[allow(non_camel_case_types)]
@@ -52,7 +52,7 @@ pub enum Service<'a> {
 impl<'a> Service<'a> {
     /// Creates a [`Service`] enum variant based on the provided service name string.
     #[must_use]
-    pub fn from(service: Option<&'a str>) -> Self {
+    pub fn from_name(service: Option<&'a str>) -> Self {
         if let Some(service_name) = service {
             return match service_name.trim() {
                 "iMessage" => Service::iMessage,
@@ -178,7 +178,7 @@ impl AttachmentMeta {
 
 // MARK: GroupAction
 /// Represents different types of group message actions that can occur in a chat system
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum GroupAction<'a> {
     /// A new participant has been added to the group
     ParticipantAdded(i32),
@@ -196,6 +196,8 @@ pub enum GroupAction<'a> {
     ChatBackgroundChanged,
     /// The chat background was removed
     ChatBackgroundRemoved,
+    /// A participant changed their phone number
+    PhoneNumberChanged(i32),
 }
 
 impl<'a> GroupAction<'a> {
@@ -208,6 +210,10 @@ impl<'a> GroupAction<'a> {
             message.other_handle,
             &message.group_title,
         ) {
+            // If the handle_id of the message matches the other_handle, the sender changed their own phone number
+            (1, 0, Some(who), _) if message.handle_id == Some(who) => {
+                Some(Self::PhoneNumberChanged(who))
+            }
             (1, 0, Some(who), _) => Some(Self::ParticipantAdded(who)),
             (1, 1, Some(who), _) => Some(Self::ParticipantRemoved(who)),
             (2, _, _, Some(name)) => Some(Self::NameChange(name)),

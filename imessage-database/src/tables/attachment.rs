@@ -7,6 +7,7 @@ use rusqlite::{CachedStatement, Connection, Error, Result, Row};
 use sha1::{Digest, Sha1};
 
 use std::{
+    borrow::Cow,
     fmt::Write,
     fs::File,
     io::Read,
@@ -17,23 +18,24 @@ use crate::{
     error::{attachment::AttachmentError, table::TableError},
     message_types::sticker::{StickerEffect, StickerSource, get_sticker_effect},
     tables::{
+        diagnostic::AttachmentDiagnostic,
         messages::Message,
         table::{ATTACHMENT, ATTRIBUTION_INFO, STICKER_USER_INFO, Table},
     },
     util::{
-        dates::TIMESTAMP_FACTOR,
-        dirs::home,
-        output::{done_processing, processing},
-        platform::Platform,
-        plist::plist_as_dictionary,
-        query_context::QueryContext,
-        size::format_file_size,
+        dates::TIMESTAMP_FACTOR, dirs::home, platform::Platform, plist::plist_as_dictionary,
+        query_context::QueryContext, size::format_file_size,
     },
 };
 
 // MARK: Constants
 /// The default root directory for iMessage database files, which is replaced with the custom attachment root if provided
 pub const DEFAULT_MESSAGES_ROOT: &str = "~/Library/Messages";
+/// Alternate root directory used by a jailbroken iOS device's `sms.db`
+///
+/// The `sms.db` database uses the same schema and path conventions as a macOS `chat.db`,
+/// but attachment paths are rooted under `~/Library/SMS` instead of `~/Library/Messages`.
+pub const DEFAULT_SMS_ROOT: &str = "~/Library/SMS";
 /// The default root directory for iMessage attachment data
 pub const DEFAULT_ATTACHMENT_ROOT: &str = "~/Library/Messages/Attachments";
 /// The default root directory for iMessage sticker cache data
@@ -131,20 +133,13 @@ impl Table for Attachment {
     fn get(db: &'_ Connection) -> Result<CachedStatement<'_>, TableError> {
         Ok(db.prepare_cached(&format!("SELECT * from {ATTACHMENT}"))?)
     }
-
-    fn extract(attachment: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
-        match attachment {
-            Ok(Ok(attachment)) => Ok(attachment),
-            Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
-        }
-    }
 }
 
 // MARK: Impl
 impl Attachment {
     /// Gets a Vector of attachments associated with a single message
     ///
-    /// The order of the attachments aligns with the order of the [`BubbleComponent::Attachment`](crate::tables::messages::models::BubbleComponent::Attachment)s in the message's [`body()`](crate::tables::messages::message::Message::attributed_body).
+    /// The order of the attachments aligns with the order of the [`BubbleComponent::Attachment`](crate::tables::messages::models::BubbleComponent::Attachment)s in the message's [`attributed_body()`](crate::tables::messages::message::Message::attributed_body).
     pub fn from_message(db: &Connection, msg: &Message) -> Result<Vec<Attachment>, TableError> {
         let mut out_l = vec![];
         if msg.has_attachments() {
@@ -254,7 +249,7 @@ impl Attachment {
 
         // Try to parse the HEIC data
         if let Some(data) = self.as_bytes(platform, db_path, custom_attachment_root)? {
-            return Ok(Some(get_sticker_effect(data)));
+            return Ok(Some(get_sticker_effect(&data)));
         }
 
         // Default if the attachment is a sticker and cannot be parsed/read
@@ -342,9 +337,18 @@ impl Attachment {
     /// On iOS, file names are derived from SHA-1 hash of `MediaDomain-` concatenated with the relative [`self.filename()`](Self::filename).
     /// Between the domain and the path there is a dash. Read more [here](https://theapplewiki.com/index.php?title=ITunes_Backup).
     ///
-    /// Use the optional `custom_attachment_root` parameter when the attachments are not stored in
-    /// the same place as the database expects.The expected location is [`DEFAULT_ATTACHMENT_ROOT`].
-    /// A custom attachment root like `/custom/path` will overwrite a path like `~/Library/Messages/Attachments/3d/...` to `/custom/path/3d/...`
+    /// Use the optional `custom_attachment_root` parameter when attachment data is stored under a
+    /// different Messages root than the database expects. This replaces the leading Messages root,
+    /// not just the `Attachments` directory, so it affects both [`DEFAULT_ATTACHMENT_ROOT`] and
+    /// [`DEFAULT_STICKER_CACHE_ROOT`].
+    ///
+    /// For example, a custom attachment root like `/custom/path` will rewrite
+    /// `~/Library/Messages/Attachments/3d/...` to `/custom/path/Attachments/3d/...` and
+    /// `~/Library/Messages/StickerCache/ab/...` to `/custom/path/StickerCache/ab/...`.
+    ///
+    /// For a jailbroken iOS `sms.db`, attachment paths start with [`DEFAULT_SMS_ROOT`] (`~/Library/SMS`)
+    /// instead of [`DEFAULT_MESSAGES_ROOT`]. These databases behave like macOS databases and should
+    /// use [`Platform::macOS`] — not [`Platform::iOS`], which is reserved for encrypted Finder/Apple Devices/iTunes backups.
     #[must_use]
     pub fn resolved_attachment_path(
         &self,
@@ -352,40 +356,37 @@ impl Attachment {
         db_path: &Path,
         custom_attachment_root: Option<&str>,
     ) -> Option<String> {
-        if let Some(mut path_str) = self.filename.clone() {
-            // Apply custom attachment path, if provided
-            if let Some(custom_attachment_path) = custom_attachment_root
-                && (path_str.starts_with(DEFAULT_STICKER_CACHE_ROOT)
-                    || path_str.starts_with(DEFAULT_ATTACHMENT_ROOT))
-            {
-                path_str = path_str.replacen(DEFAULT_MESSAGES_ROOT, custom_attachment_path, 1);
-            }
+        let mut path_str = self.filename.clone()?;
 
-            return match platform {
-                Platform::macOS => Some(Attachment::gen_macos_attachment(&path_str)),
-                Platform::iOS => Attachment::gen_ios_attachment(&path_str, db_path),
-            };
+        // Apply custom attachment path, if provided
+        if matches!(platform, Platform::macOS)
+            && let Some(custom_attachment_path) = custom_attachment_root
+        {
+            path_str =
+                Attachment::apply_custom_root(&path_str, custom_attachment_path).into_owned();
         }
-        None
+
+        match platform {
+            Platform::macOS => Some(Attachment::gen_macos_attachment(&path_str)),
+            Platform::iOS => Attachment::gen_ios_attachment(&path_str, db_path),
+        }
     }
 
-    /// Emit diagnostic data for the Attachments table
+    /// Compute diagnostic data for the Attachments table
     ///
-    /// This is defined outside of [`Diagnostic`](crate::tables::table::Diagnostic) because it requires additional data.
-    ///
-    /// Get the number of attachments that are missing, either because the path is missing from the
+    /// Counts the number of attachments that are missing, either because the path is missing from the
     /// table or the path does not point to a file.
     ///
     /// # Example:
     ///
     /// ```
     /// use imessage_database::util::{dirs::default_db_path, platform::Platform};
-    /// use imessage_database::tables::table::{Diagnostic, get_connection};
+    /// use imessage_database::tables::table::get_connection;
     /// use imessage_database::tables::attachment::Attachment;
     ///
     /// let db_path = default_db_path();
     /// let conn = get_connection(&db_path).unwrap();
-    /// Attachment::run_diagnostic(&conn, &db_path, &Platform::macOS);
+    /// Attachment::run_diagnostic(&conn, &db_path, &Platform::macOS, None);
     /// ```
     ///
     /// `db_path` is the path to the root of the backup directory.
@@ -394,11 +395,11 @@ impl Attachment {
         db: &Connection,
         db_path: &Path,
         platform: &Platform,
-    ) -> Result<(), TableError> {
-        processing();
-        let mut total_attachments = 0;
-        let mut null_attachments = 0;
-        let mut size_on_disk: u64 = 0;
+        custom_attachment_root: Option<&str>,
+    ) -> Result<AttachmentDiagnostic, TableError> {
+        let mut total_attachments = 0usize;
+        let mut no_path_provided = 0usize;
+        let mut total_bytes_on_disk: u64 = 0;
         let mut statement_paths = db.prepare(&format!("SELECT filename FROM {ATTACHMENT}"))?;
         let paths = statement_paths.query_map([], |r| Ok(r.get(0)))?;
 
@@ -410,22 +411,33 @@ impl Attachment {
                 if let Ok(filepath) = path {
                     match platform {
                         Platform::macOS => {
-                            let path = Attachment::gen_macos_attachment(filepath);
+                            let path = match custom_attachment_root {
+                                Some(custom_root) => Attachment::gen_macos_attachment(
+                                    &Attachment::apply_custom_root(filepath, custom_root),
+                                ),
+                                None => Attachment::gen_macos_attachment(filepath),
+                            };
                             let file = Path::new(&path);
-                            if let Ok(metadata) = file.metadata() {
-                                size_on_disk += metadata.len();
+                            match file.metadata() {
+                                Ok(metadata) => {
+                                    total_bytes_on_disk += metadata.len();
+                                    false
+                                }
+                                Err(_) => true,
                             }
-                            !file.exists()
                         }
                         Platform::iOS => {
                             if let Some(parsed_path) =
                                 Attachment::gen_ios_attachment(filepath, db_path)
                             {
                                 let file = Path::new(&parsed_path);
-                                if let Ok(metadata) = file.metadata() {
-                                    size_on_disk += metadata.len();
-                                }
-                                return !file.exists();
+                                return match file.metadata() {
+                                    Ok(metadata) => {
+                                        total_bytes_on_disk += metadata.len();
+                                        false
+                                    }
+                                    Err(_) => true,
+                                };
                             }
                             // This hits if the attachment path doesn't get generated
                             true
@@ -433,41 +445,37 @@ impl Attachment {
                     }
                 } else {
                     // This hits if there is no path provided for the current attachment
-                    null_attachments += 1;
+                    no_path_provided += 1;
                     true
                 }
             })
             .count();
 
-        let total_bytes =
+        let total_bytes_referenced =
             Attachment::get_total_attachment_bytes(db, &QueryContext::default()).unwrap_or(0);
 
-        done_processing();
+        Ok(AttachmentDiagnostic {
+            total_attachments,
+            total_bytes_referenced,
+            total_bytes_on_disk,
+            missing_files,
+            no_path_provided,
+        })
+    }
 
-        if total_attachments > 0 {
-            println!("\rAttachment diagnostic data:");
-            println!("    Total attachments: {total_attachments}");
-            println!(
-                "        Data referenced in table: {}",
-                format_file_size(total_bytes)
-            );
-            println!(
-                "        Data present on disk: {}",
-                format_file_size(size_on_disk)
-            );
-            if missing_files > 0 && total_attachments > 0 {
-                println!(
-                    "    Missing files: {missing_files:?} ({:.0}%)",
-                    (missing_files as f64 / f64::from(total_attachments)) * 100f64
-                );
-                println!("        No path provided: {null_attachments}");
-                println!(
-                    "        No file located: {}",
-                    missing_files.saturating_sub(null_attachments)
-                );
-            }
+    /// Replace the default Messages or SMS root prefix with a custom attachment root.
+    fn apply_custom_root<'a>(path: &'a str, custom_root: &str) -> Cow<'a, str> {
+        let prefix = if path.starts_with(DEFAULT_MESSAGES_ROOT) {
+            Some(DEFAULT_MESSAGES_ROOT)
+        } else if path.starts_with(DEFAULT_SMS_ROOT) {
+            Some(DEFAULT_SMS_ROOT)
+        } else {
+            None
+        };
+        match prefix {
+            Some(old) => Cow::Owned(path.replacen(old, custom_root, 1)),
+            None => Cow::Borrowed(path),
         }
-        Ok(())
     }
 
     /// Generate a macOS path for an attachment
@@ -543,7 +551,8 @@ mod tests {
     use crate::{
         tables::{
             attachment::{
-                Attachment, DEFAULT_ATTACHMENT_ROOT, DEFAULT_STICKER_CACHE_ROOT, MediaType,
+                Attachment, DEFAULT_ATTACHMENT_ROOT, DEFAULT_SMS_ROOT, DEFAULT_STICKER_CACHE_ROOT,
+                MediaType,
             },
             table::get_connection,
         },
@@ -739,6 +748,39 @@ mod tests {
         assert_eq!(
             attachment.resolved_attachment_path(&Platform::iOS, &db_path, Some("custom/root")),
             Some("fake_root/41/41746ffc65924078eae42725c979305626f57cca".to_string())
+        );
+    }
+
+    #[test]
+    fn can_get_resolved_path_ios_custom_ignores_prefixed_path() {
+        let db_path = PathBuf::from("fake_root");
+        let mut attachment = sample_attachment();
+        attachment.filename = Some(format!("{DEFAULT_ATTACHMENT_ROOT}/a/b/c.png"));
+        let expected = attachment.resolved_attachment_path(&Platform::iOS, &db_path, None);
+
+        // Custom attachment roots do not apply to iOS backups, even when the stored filename
+        // resembles a macOS-style attachment path.
+        assert_eq!(
+            attachment.resolved_attachment_path(&Platform::iOS, &db_path, Some("/custom/root")),
+            expected
+        );
+    }
+
+    #[test]
+    fn can_get_resolved_path_ios_smsdb() {
+        let db_path = PathBuf::from("fake_root");
+        let mut attachment = sample_attachment();
+        attachment.filename = Some(format!("{DEFAULT_SMS_ROOT}/Attachments/a/b/c.png"));
+
+        assert_eq!(
+            attachment.resolved_attachment_path(
+                // A jailbroken iOS sms.db uses `Platform::macOS` conventions, not `Platform::iOS`,
+                // since the attachments are stored in direct filesystem paths, not SHA-1 hashed backup paths
+                &Platform::macOS,
+                &db_path,
+                Some("/custom/path"),
+            ),
+            Some("/custom/path/Attachments/a/b/c.png".to_string())
         );
     }
 

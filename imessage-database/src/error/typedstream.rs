@@ -1,5 +1,5 @@
 /*!
- Errors that can happen when parsing `typedstream` data. This module is for the new `typedstream` deserializer.
+ Errors that can happen when parsing `typedstream` data. This module is for the legacy `typedstream` deserializer; the current one is in the `crabstep` crate.
 */
 
 use std::{
@@ -25,6 +25,8 @@ pub enum TypedStreamError {
     /// Indicates that a pointer could not be parsed, with the invalid byte value
     InvalidPointer(usize),
 }
+
+impl std::error::Error for TypedStreamError {}
 
 impl Display for TypedStreamError {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {

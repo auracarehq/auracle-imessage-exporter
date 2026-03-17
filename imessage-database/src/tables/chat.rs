@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use plist::Value;
-use rusqlite::{CachedStatement, Connection, Error, Result, Row};
+use rusqlite::{CachedStatement, Connection, Result, Row};
 
 use crate::{
     error::{plist::PlistParseError, table::TableError},
@@ -25,15 +25,15 @@ use crate::{
 #[derive(Debug, PartialEq, Eq)]
 pub struct Properties {
     /// Whether the chat has read receipts enabled
-    read_receipts_enabled: bool,
+    pub read_receipts_enabled: bool,
     /// The most recent message in the chat
-    last_message_guid: Option<String>,
+    pub last_message_guid: Option<String>,
     /// Whether the chat was forced to use SMS/RCS instead of iMessage
-    forced_sms: bool,
+    pub forced_sms: bool,
     /// GUID of the group photo, if it exists in the attachments table
-    group_photo_guid: Option<String>,
+    pub group_photo_guid: Option<String>,
     /// Whether the chat has a custom background image
-    has_chat_background: bool,
+    pub has_chat_background: bool,
 }
 
 impl Properties {
@@ -63,7 +63,7 @@ pub struct Chat {
     pub chat_identifier: String,
     /// The service the chat used, i.e. iMessage, SMS, IRC, etc.
     pub service_name: Option<String>,
-    /// Optional custom name created created for the chat
+    /// Optional custom name created for the chat
     pub display_name: Option<String>,
 }
 
@@ -80,13 +80,6 @@ impl Table for Chat {
 
     fn get(db: &'_ Connection) -> Result<CachedStatement<'_>, TableError> {
         Ok(db.prepare_cached(&format!("SELECT * from {CHAT}"))?)
-    }
-
-    fn extract(chat: Result<Result<Self, Error>, Error>) -> Result<Self, TableError> {
-        match chat {
-            Ok(Ok(chat)) => Ok(chat),
-            Err(why) | Ok(Err(why)) => Err(TableError::QueryError(why)),
-        }
     }
 }
 
@@ -152,7 +145,7 @@ impl Chat {
     /// Get the service used by the chat, i.e. iMessage, SMS, IRC, etc.
     #[must_use]
     pub fn service(&'_ self) -> Service<'_> {
-        Service::from(self.service_name.as_deref())
+        Service::from_name(self.service_name.as_deref())
     }
 
     /// Get the [`Properties`] for the chat, if they exist

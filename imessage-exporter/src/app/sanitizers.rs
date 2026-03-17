@@ -2,31 +2,33 @@
  Defines routines for sanitizing text data.
 */
 
-use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
-
 use std::borrow::Cow;
 
-/// Characters disallowed in a filename
-static FILENAME_DISALLOWED_CHARS: LazyLock<HashSet<char>> =
-    LazyLock::new(|| HashSet::from(['*', '"', '/', '\\', '<', '>', ':', '|', '?']));
 /// The character to replace disallowed chars with
 const FILENAME_REPLACEMENT_CHAR: char = '_';
 
-/// Characters disallowed in HTML
-static HTML_DISALLOWED_CHARS: LazyLock<HashMap<char, &str>> = LazyLock::new(|| {
-    HashMap::from([
-        ('>', "&gt;"),
-        ('<', "&lt;"),
-        ('"', "&quot;"),
-        ('\'', "&apos;"),
-        ('`', "&grave;"),
-        ('&', "&amp;"),
-        (' ', "&nbsp;"),
-    ])
-});
+/// Returns true if a character is disallowed in filenames
+#[inline]
+fn is_filename_disallowed(c: char) -> bool {
+    matches!(c, '*' | '"' | '/' | '\\' | '<' | '>' | ':' | '|' | '?')
+}
 
-/// Remove unsafe chars in [this list](FILENAME_DISALLOWED_CHARS).
+/// Returns the HTML entity replacement for a character, if it needs escaping
+#[inline]
+fn html_replacement(c: char) -> Option<&'static str> {
+    match c {
+        '>' => Some("&gt;"),
+        '<' => Some("&lt;"),
+        '"' => Some("&quot;"),
+        '\'' => Some("&apos;"),
+        '`' => Some("&grave;"),
+        '&' => Some("&amp;"),
+        '\u{a0}' => Some("&nbsp;"),
+        _ => None,
+    }
+}
+
+/// Remove unsafe chars in filenames.
 ///
 /// Does not need to use a `Cow` for optimization because the source is always generated based on chat data
 /// so there is no opportunity for the original input to be passed in from another borrow.
@@ -34,7 +36,7 @@ pub fn sanitize_filename(filename: &str) -> String {
     filename
         .chars()
         .map(|letter| {
-            if letter.is_control() || FILENAME_DISALLOWED_CHARS.contains(&letter) {
+            if letter.is_control() || is_filename_disallowed(letter) {
                 FILENAME_REPLACEMENT_CHAR
             } else {
                 letter
@@ -46,11 +48,11 @@ pub fn sanitize_filename(filename: &str) -> String {
 /// Escapes HTML special characters in the input string, allocating a new string only if necessary.
 pub fn sanitize_html(input: &'_ str) -> Cow<'_, str> {
     for (idx, c) in input.char_indices() {
-        if HTML_DISALLOWED_CHARS.contains_key(&c) {
+        if html_replacement(c).is_some() {
             let mut res = String::from(&input[..idx]);
             input[idx..]
                 .chars()
-                .for_each(|c| match HTML_DISALLOWED_CHARS.get(&c) {
+                .for_each(|c| match html_replacement(c) {
                     Some(replacement) => res.push_str(replacement),
                     None => res.push(c),
                 });
@@ -58,6 +60,47 @@ pub fn sanitize_html(input: &'_ str) -> Cow<'_, str> {
         }
     }
     Cow::Borrowed(input)
+}
+
+/// A builder for constructing HTML strings that escapes dynamic content by default.
+///
+/// Use `raw()` for trusted HTML structure and `text()` for content between tags.
+pub(crate) struct HtmlBuilder {
+    buf: String,
+}
+
+impl HtmlBuilder {
+    /// Creates a new empty builder
+    pub(crate) fn new() -> Self {
+        Self { buf: String::new() }
+    }
+
+    /// Creates a new builder with pre-allocated capacity
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: String::with_capacity(capacity),
+        }
+    }
+
+    /// Appends raw, pre-built HTML (not escaped)
+    #[inline]
+    pub(crate) fn raw(&mut self, html: &str) -> &mut Self {
+        self.buf.push_str(html);
+        self
+    }
+
+    /// Appends HTML-escaped text content
+    #[inline]
+    pub(crate) fn text(&mut self, content: &str) -> &mut Self {
+        self.buf.push_str(&sanitize_html(content));
+        self
+    }
+
+    /// Consumes the builder and returns the HTML string
+    #[inline]
+    pub(crate) fn build(self) -> String {
+        self.buf
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +346,54 @@ mod html_sanitization_tests {
     #[test]
     fn handles_attribute() {
         assert_eq!(&sanitize_html("class=\"test\""), "class=&quot;test&quot;");
+    }
+}
+
+#[cfg(test)]
+mod html_builder_tests {
+    use crate::app::sanitizers::HtmlBuilder;
+
+    #[test]
+    fn raw_passes_through() {
+        let mut h = HtmlBuilder::new();
+        h.raw("<div class=\"test\">");
+        assert_eq!(h.build(), "<div class=\"test\">");
+    }
+
+    #[test]
+    fn text_escapes_html() {
+        let mut h = HtmlBuilder::new();
+        h.raw("<span>")
+            .text("<script>alert('xss')</script>")
+            .raw("</span>");
+        assert_eq!(
+            h.build(),
+            "<span>&lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;</span>"
+        );
+    }
+
+    #[test]
+    fn attr_escapes_quotes() {
+        let mut h = HtmlBuilder::new();
+        h.raw("<a href=\"")
+            .text("javascript:alert(\"xss\")")
+            .raw("\">");
+        assert_eq!(h.build(), "<a href=\"javascript:alert(&quot;xss&quot;)\">");
+    }
+
+    #[test]
+    fn text_no_alloc_for_safe_content() {
+        let mut h = HtmlBuilder::new();
+        h.raw("<div>").text("Hello world").raw("</div>");
+        assert_eq!(h.build(), "<div>Hello world</div>");
+    }
+
+    #[test]
+    fn chaining_works() {
+        let mut h = HtmlBuilder::new();
+        h.raw("<div class=\"name\">")
+            .text("Bob & Alice")
+            .raw("</div>");
+        assert_eq!(h.build(), "<div class=\"name\">Bob &amp; Alice</div>");
     }
 }

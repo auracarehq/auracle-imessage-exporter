@@ -5,7 +5,7 @@ use std::{
     },
     fmt::Write as FmtWrite,
     fs::File,
-    io::{BufWriter, Write},
+    io::BufWriter,
 };
 
 use crate::{
@@ -13,7 +13,10 @@ use crate::{
         compatibility::attachment_manager::AttachmentManagerMode, error::RuntimeError,
         progress::ExportProgress, runtime::Config,
     },
-    exporters::exporter::{ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, MessageFormatter},
+    exporters::{
+        exporter::{ATTACHMENT_NO_FILENAME, BalloonFormatter, Exporter, MessageFormatter},
+        shared::{format_expressive, message_time},
+    },
 };
 
 use imessage_database::{
@@ -24,7 +27,6 @@ use imessage_database::{
         collaboration::CollaborationMessage,
         digital_touch::{self, DigitalTouch},
         edited::{EditStatus, EditedMessage},
-        expressives::{BubbleEffect, Expressive, ScreenEffect},
         handwriting::HandwrittenMessage,
         music::MusicMessage,
         placemark::PlacemarkMessage,
@@ -117,8 +119,10 @@ impl<'a> Exporter<'a> for TXT<'a> {
             }
             current_message_row = msg.rowid;
 
-            // Generate the text of the message
-            let _ = msg.generate_text(self.config.data_source.db());
+            // Parse and apply the message body
+            if let Ok(body) = msg.parse_body(self.config.data_source.db()) {
+                msg.apply_body(body);
+            }
 
             // Render the announcement in-line
             if msg.is_announcement() {
@@ -147,12 +151,11 @@ impl<'a> Exporter<'a> for TXT<'a> {
         match self.config.conversation(message) {
             Some((chatroom, _)) => {
                 let filename = self.config.filename(chatroom);
-                match self.files.entry(filename) {
+                match self.files.entry(filename.clone()) {
                     Occupied(entry) => Ok(entry.into_mut()),
                     Vacant(entry) => {
                         let mut path = self.config.options.export_path.clone();
-                        path.push(self.config.filename(chatroom));
-                        path.set_extension("txt");
+                        path.push(filename);
 
                         let file = File::options().append(true).create(true).open(&path)?;
 
@@ -162,11 +165,6 @@ impl<'a> Exporter<'a> for TXT<'a> {
             }
             None => Ok(&mut self.orphaned),
         }
-    }
-
-    fn write_to_file(file: &mut BufWriter<File>, text: &str) -> Result<(), RuntimeError> {
-        file.write_all(text.as_bytes())
-            .map_err(RuntimeError::DiskError)
     }
 }
 
@@ -334,11 +332,7 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
                     .try_for_each(|tapbacks| -> Result<(), TableError> {
                         let formatted = self.format_tapback(tapbacks)?;
                         if !formatted.is_empty() {
-                            self.add_line(
-                                &mut formatted_tapbacks,
-                                &self.format_tapback(tapbacks)?,
-                                &indent,
-                            );
+                            self.add_line(&mut formatted_tapbacks, &formatted, &indent);
                         }
                         Ok(())
                     })?;
@@ -354,7 +348,9 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
                 replies
                     .iter_mut()
                     .try_for_each(|reply| -> Result<(), TableError> {
-                        let _ = reply.generate_text(self.config.data_source.db());
+                        if let Ok(body) = reply.parse_body(self.config.data_source.db()) {
+                            reply.apply_body(body);
+                        }
                         if !reply.is_tapback() {
                             self.add_line(
                                 &mut formatted_message,
@@ -403,15 +399,17 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
         }
 
         // Copy the file, if requested
-        self.config
-            .options
-            .attachment_manager
-            .handle_attachment(message, attachment, self.config)
-            .ok_or(attachment.filename().ok_or(ATTACHMENT_NO_FILENAME)?)?;
+        let handle_result = self.config.options.attachment_manager.handle_attachment(
+            message,
+            attachment,
+            self.config,
+        );
 
         if will_encode {
             self.pb.set_default_style();
         }
+
+        handle_result.ok_or(attachment.filename().ok_or(ATTACHMENT_NO_FILENAME)?)?;
 
         // Append the transcription if one is provided
         if let Some(transcription) = &metadata.transcription {
@@ -615,39 +613,23 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
     }
 
     fn format_expressive(&self, msg: &'a Message) -> &'a str {
-        match msg.get_expressive() {
-            Expressive::Screen(effect) => match effect {
-                ScreenEffect::Confetti => "Sent with Confetti",
-                ScreenEffect::Echo => "Sent with Echo",
-                ScreenEffect::Fireworks => "Sent with Fireworks",
-                ScreenEffect::Balloons => "Sent with Balloons",
-                ScreenEffect::Heart => "Sent with Heart",
-                ScreenEffect::Lasers => "Sent with Lasers",
-                ScreenEffect::ShootingStar => "Sent with Shooting Star",
-                ScreenEffect::Sparkles => "Sent with Sparkles",
-                ScreenEffect::Spotlight => "Sent with Spotlight",
-            },
-            Expressive::Bubble(effect) => match effect {
-                BubbleEffect::Slam => "Sent with Slam",
-                BubbleEffect::Loud => "Sent with Loud",
-                BubbleEffect::Gentle => "Sent with Gentle",
-                BubbleEffect::InvisibleInk => "Sent with Invisible Ink",
-            },
-            Expressive::Unknown(effect) => effect,
-            Expressive::None => "",
-        }
+        format_expressive(msg)
     }
 
     fn format_announcement(&self, msg: &'a Message) -> String {
         let mut who = self
             .config
             .who(msg.handle_id, msg.is_from_me(), &msg.destination_caller_id);
+
         // Rename yourself so we render the proper grammar here
         if who == ME {
             who = self.config.options.custom_name.as_deref().unwrap_or(YOU);
         }
 
-        let timestamp = format(&msg.date(&self.config.offset));
+        let timestamp = match msg.date(self.config.offset) {
+            Ok(d) => format(&d),
+            Err(why) => why.to_string(),
+        };
 
         match msg.get_announcement() {
             Some(announcement) => {
@@ -684,6 +666,9 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
                         }
                         GroupAction::ChatBackgroundRemoved => {
                             "removed the chat background.".to_string()
+                        }
+                        GroupAction::PhoneNumberChanged(_) => {
+                            "changed their phone number.".to_string()
                         }
                     },
                     Announcement::AudioMessageKept => "kept an audio message.".to_string(),
@@ -728,15 +713,20 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
                             // Original message get an absolute timestamp
                             None => {
                                 let parsed_timestamp =
-                                    format(&get_local_time(&event.date, &self.config.offset));
+                                    match get_local_time(event.date, self.config.offset) {
+                                        Ok(d) => format(&d),
+                                        Err(why) => why.to_string(),
+                                    };
                                 out_s.push_str(&parsed_timestamp);
                                 out_s.push(' ');
                             }
                             // Subsequent edits get a relative timestamp
                             Some(prev_timestamp) => {
-                                let end = get_local_time(&event.date, &self.config.offset);
-                                let start = get_local_time(prev_timestamp, &self.config.offset);
-                                if let Some(diff) = readable_diff(start, end) {
+                                if let (Ok(start), Ok(end)) = (
+                                    get_local_time(*prev_timestamp, self.config.offset),
+                                    get_local_time(event.date, self.config.offset),
+                                ) && let Some(diff) = readable_diff(&start, &end)
+                                {
                                     out_s.push_str(indent);
                                     out_s.push_str("Edited ");
                                     out_s.push_str(&diff);
@@ -761,10 +751,12 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
                         "They"
                     };
 
-                    if let Some(diff) = readable_diff(
-                        msg.date(&self.config.offset),
-                        msg.date_edited(&self.config.offset),
-                    ) {
+                    if let Some(diff) = msg
+                        .date(self.config.offset)
+                        .ok()
+                        .zip(msg.date_edited(self.config.offset).ok())
+                        .and_then(|(s, e)| readable_diff(&s, &e))
+                    {
                         out_s.push_str(who);
                         out_s.push_str(" unsent this message part ");
                         out_s.push_str(&diff);
@@ -1064,31 +1056,34 @@ impl<'a> BalloonFormatter<&'a str> for TXT<'a> {
         if let Some(date_str) = metadata.get("estimatedEndTime") {
             // Parse the estimated end time from the message's query string
             let date_stamp = date_str.parse::<f64>().unwrap_or(0.) as i64 * TIMESTAMP_FACTOR;
-            let date_time = get_local_time(&date_stamp, &0);
-            let date_string = format(&date_time);
+            if let Ok(date_time) = get_local_time(date_stamp, 0) {
+                let date_string = format(&date_time);
 
-            out_s.push_str("\nExpected at ");
-            out_s.push_str(&date_string);
+                out_s.push_str("\nExpected at ");
+                out_s.push_str(&date_string);
+            }
         }
         // Expired check-in
         else if let Some(date_str) = metadata.get("triggerTime") {
             // Parse the estimated end time from the message's query string
             let date_stamp = date_str.parse::<f64>().unwrap_or(0.) as i64 * TIMESTAMP_FACTOR;
-            let date_time = get_local_time(&date_stamp, &0);
-            let date_string = format(&date_time);
+            if let Ok(date_time) = get_local_time(date_stamp, 0) {
+                let date_string = format(&date_time);
 
-            out_s.push_str("\nWas expected at ");
-            out_s.push_str(&date_string);
+                out_s.push_str("\nWas expected at ");
+                out_s.push_str(&date_string);
+            }
         }
         // Accepted check-in
         else if let Some(date_str) = metadata.get("sendDate") {
             // Parse the estimated end time from the message's query string
             let date_stamp = date_str.parse::<f64>().unwrap_or(0.) as i64 * TIMESTAMP_FACTOR;
-            let date_time = get_local_time(&date_stamp, &0);
-            let date_string = format(&date_time);
+            if let Ok(date_time) = get_local_time(date_stamp, 0) {
+                let date_string = format(&date_time);
 
-            out_s.push_str("\nChecked in at ");
-            out_s.push_str(&date_string);
+                out_s.push_str("\nChecked in at ");
+                out_s.push_str(&date_string);
+            }
         }
 
         out_s
@@ -1164,19 +1159,14 @@ impl<'a> BalloonFormatter<&'a str> for TXT<'a> {
 // MARK: Impl
 impl TXT<'_> {
     fn get_time(&self, message: &Message) -> String {
-        let mut date = format(&message.date(&self.config.offset));
-        let read_after = message.time_until_read(&self.config.offset);
-        if let Some(time) = read_after
-            && !time.is_empty()
-        {
-            let who = if message.is_from_me() {
-                "them"
-            } else {
-                self.config.options.custom_name.as_deref().unwrap_or("you")
-            };
-            let _ = write!(date, " (Read by {who} after {time})");
+        let (mut date, read_receipt) = message_time(self.config, message);
+        if read_receipt.is_empty() {
+            date
+        } else {
+            date.push(' ');
+            date.push_str(&read_receipt);
+            date
         }
-        date
     }
 
     fn add_line(&self, string: &mut String, part: &str, indent: &str) {
@@ -1533,6 +1523,64 @@ mod tests {
 
         let actual = exporter.format_announcement(&message);
         let expected = "May 17, 2022  5:29:42 PM You removed Other from the conversation.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_group_removed_other() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, Name::fake_name(ME));
+        config.participants.insert(1, Name::fake_name("Other"));
+        config.participants.insert(2, Name::fake_name("Second"));
+        config.real_participants.insert(0, 0);
+        config.real_participants.insert(1, 1);
+        config.real_participants.insert(2, 2);
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = false;
+        message.handle_id = Some(1);
+        message.item_type = 1;
+        message.group_action_type = 1;
+        message.other_handle = Some(2);
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM Other removed Second from the conversation.\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_group_changed_number() {
+        // Create exporter
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config.participants.insert(0, Name::fake_name(ME));
+        config.participants.insert(1, Name::fake_name("Other"));
+        config.real_participants.insert(0, 0);
+        config.real_participants.insert(1, 1);
+
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.group_title = Some("Hello world".to_string());
+        message.is_from_me = false;
+        message.handle_id = Some(1);
+        message.item_type = 1;
+        message.group_action_type = 0;
+        message.other_handle = Some(1);
+
+        let actual = exporter.format_announcement(&message);
+        let expected = "May 17, 2022  5:29:42 PM Other changed their phone number.\n\n";
 
         assert_eq!(actual, expected);
     }
@@ -2235,7 +2283,9 @@ mod tests {
                     ]
                 ),
             ]),];
-        let _ = message.generate_text(config.data_source.db());
+
+        let body = message.parse_body(config.data_source.db()).unwrap();
+        message.apply_body(body);
 
         let actual = exporter.format_message(&message, 0).unwrap();
 
@@ -2809,7 +2859,7 @@ mod text_effect_tests {
     }
 
     #[test]
-    fn can_format_html_text_styled_overlapping_ranges() {
+    fn can_format_txt_text_styled_overlapping_ranges() {
         // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);

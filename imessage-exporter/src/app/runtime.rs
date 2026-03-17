@@ -18,11 +18,12 @@ use imessage_database::{
         chat_handle::ChatToHandle,
         handle::Handle,
         messages::Message,
-        table::{
-            ATTACHMENTS_DIR, Cacheable, Deduplicate, Diagnostic, ME, ORPHANED, UNKNOWN, get_db_size,
-        },
+        table::{ATTACHMENTS_DIR, Cacheable, ME, ORPHANED, UNKNOWN, get_db_size},
     },
-    util::{dates::get_offset, size::format_file_size},
+    util::{
+        dates::{format as format_date, get_local_time, get_offset, readable_diff},
+        size::format_file_size,
+    },
 };
 
 use crate::{
@@ -64,7 +65,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Get a deduplicated chat ID or a default value
+    /// Get the chatroom and its deduplicated ID for a message, if available
     pub fn conversation(&self, message: &Message) -> Option<(&Chat, &i32)> {
         match message.chat_id.or(message.deleted_from) {
             Some(chat_id) => {
@@ -147,9 +148,10 @@ impl Config {
         let mut filename = match &chatroom.display_name() {
             // If there is a display name, use that
             Some(name) => {
+                let truncated_len = name.floor_char_boundary(min(max_len, name.len()));
                 format!(
                     "{} - {}",
-                    &name[..min(max_len, name.len())],
+                    &name[..truncated_len],
                     // Get the deduplicated chat ID to ensure the filename is unique, even if the group name is not
                     self.real_chatrooms
                         .get(&chatroom.rowid)
@@ -207,9 +209,12 @@ impl Config {
                 let extra = format!(", and {} others", participants.len() - added);
                 let space_remaining = extra.len() + out_s.len();
                 if space_remaining >= max_len {
-                    out_s.replace_range((max_len - extra.len()).., &extra);
+                    let start = out_s.floor_char_boundary(max_len.saturating_sub(extra.len()));
+                    out_s.replace_range(start.., &extra);
                 } else if out_s.is_empty() {
-                    out_s.push_str(&participant_details[..max_len]);
+                    let truncated_len = participant_details
+                        .floor_char_boundary(min(max_len, participant_details.len()));
+                    out_s.push_str(&participant_details[..truncated_len]);
                 } else {
                     out_s.push_str(&extra);
                 }
@@ -222,18 +227,6 @@ impl Config {
     // MARK: Init
     /// Create a new instance of the application
     ///
-    /// # Example:
-    ///
-    /// ```
-    /// use crate::app::{
-    ///    options::{from_command_line, Options},
-    ///    runtime::Config,
-    /// };
-    ///
-    /// let args = from_command_line();
-    /// let options = Options::from_args(&args);
-    /// let app = Config::new(options).unwrap();
-    /// ```
     pub fn new(options: Options) -> Result<Config, RuntimeError> {
         let data_source = DataSource::from(&options)?;
 
@@ -277,7 +270,7 @@ impl Config {
 
     // MARK: Filters
     /// Convert comma separated list of participant strings into table chat IDs using
-    ///   1) filter `self.participant` keys based on the values (by comparing to user values)
+    ///   1) filter `self.participants` values based on name matches with the user-provided filter strings
     ///   2) get the chat IDs keys from `self.chatroom_participants` for values that contain the selected `handle_ids`
     ///   3) send those chat and handle IDs to the query context so they are included in the message table filters
     pub(crate) fn resolve_filtered_handles(&mut self) {
@@ -379,7 +372,7 @@ impl Config {
             estimated_export_size += total_attachment_size;
             if estimated_export_size >= free_space_at_location {
                 return Err(RuntimeError::NotEnoughAvailableSpace(
-                    estimated_export_size + total_attachment_size,
+                    estimated_export_size,
                     free_space_at_location,
                 ));
             }
@@ -397,14 +390,103 @@ impl Config {
     /// Handles diagnostic tests for database
     fn run_diagnostic(&self) -> Result<(), RuntimeError> {
         println!("\niMessage Database Diagnostics\n");
-        Handle::run_diagnostic(self.data_source.db())?;
-        Message::run_diagnostic(self.data_source.db())?;
-        Attachment::run_diagnostic(
+
+        // Handle diagnostics
+        let handle_diag = Handle::run_diagnostic(self.data_source.db())?;
+        println!("Handle diagnostic data:");
+        println!("    Total handles: {}", handle_diag.total_handles);
+        if handle_diag.handles_with_multiple_ids > 0 {
+            println!(
+                "    Handles with more than one ID: {}",
+                handle_diag.handles_with_multiple_ids
+            );
+        }
+        if handle_diag.total_duplicated > 0 {
+            println!(
+                "    Total duplicated handles: {}",
+                handle_diag.total_duplicated
+            );
+        }
+
+        // Message diagnostics
+        let message_diag = Message::run_diagnostic(self.data_source.db())?;
+        println!("Message diagnostic data:");
+        println!("    Total messages: {}", message_diag.total_messages);
+        if message_diag.messages_without_chat > 0 {
+            println!(
+                "    Messages not associated with a chat: {}",
+                message_diag.messages_without_chat
+            );
+        }
+        if message_diag.messages_in_multiple_chats > 0 {
+            println!(
+                "    Messages belonging to more than one chat: {}",
+                message_diag.messages_in_multiple_chats
+            );
+        }
+        if message_diag.recoverable_messages > 0 {
+            println!(
+                "    Recoverable deleted messages: {}",
+                message_diag.recoverable_messages
+            );
+        }
+        if let (Some(first), Some(last)) = (
+            message_diag.first_message_date,
+            message_diag.last_message_date,
+        ) && let (Ok(first_date), Ok(last_date)) = (
+            get_local_time(first, self.offset),
+            get_local_time(last, self.offset),
+        ) {
+            println!(
+                "    Date range: {} to {}\n                {}",
+                format_date(&first_date),
+                format_date(&last_date),
+                readable_diff(&first_date, &last_date).unwrap_or_else(|| "N/A".to_string()),
+            );
+        }
+
+        // Attachment diagnostics
+        let attach_diag = Attachment::run_diagnostic(
             self.data_source.db(),
             &self.options.db_path,
             &self.options.platform,
+            self.options.attachment_root.as_deref(),
         )?;
-        ChatToHandle::run_diagnostic(self.data_source.db())?;
+        if attach_diag.total_attachments > 0 {
+            println!("Attachment diagnostic data:");
+            println!("    Total attachments: {}", attach_diag.total_attachments);
+            println!(
+                "        Data referenced in table: {}",
+                format_file_size(attach_diag.total_bytes_referenced)
+            );
+            println!(
+                "        Data present on disk: {}",
+                format_file_size(attach_diag.total_bytes_on_disk)
+            );
+            if attach_diag.missing_files > 0 {
+                println!(
+                    "    Missing files: {} ({:.0}%)",
+                    attach_diag.missing_files,
+                    attach_diag.missing_percent().unwrap_or(0.0)
+                );
+                println!("        No path provided: {}", attach_diag.no_path_provided);
+                println!("        No file located: {}", attach_diag.no_file_located());
+            }
+        }
+
+        // Chat/thread diagnostics
+        let chat_diag = ChatToHandle::run_diagnostic(self.data_source.db())?;
+        println!("Thread diagnostic data:");
+        println!("    Total chats: {}", chat_diag.total_chats);
+        if chat_diag.total_duplicated > 0 {
+            println!("    Total duplicated chats: {}", chat_diag.total_duplicated);
+        }
+        if chat_diag.chats_with_no_handles > 0 {
+            println!(
+                "    Chats with no handles: {}",
+                chat_diag.chats_with_no_handles
+            );
+        }
 
         // Global Diagnostics
         println!("Global diagnostic data:");
@@ -445,20 +527,6 @@ impl Config {
     // MARK: Startup
     /// Start the app given the provided set of options. This will either run
     /// diagnostic tests on the database or export data to the specified file type.
-    ///
-    // # Example:
-    ///
-    /// ```
-    /// use crate::app::{
-    ///    options::{from_command_line, Options},
-    ///    runtime::Config,
-    /// };
-    ///
-    /// let args = from_command_line();
-    /// let options = Options::from_args(&args);
-    /// let app = Config::new(options).unwrap();
-    /// app.start();
-    /// ```
     pub fn start(&self) -> Result<(), RuntimeError> {
         if self.options.diagnostic {
             self.run_diagnostic()?;
@@ -824,6 +892,89 @@ mod filename_tests {
         // Get filename
         let filename = app.filename(&chat);
         assert_eq!(filename, "Default.html");
+    }
+
+    #[test]
+    fn can_get_filename_chat_display_name_truncated_emoji() {
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let app = Config::fake_app(options);
+
+        // Create a display name that is exactly at the boundary with a multi-byte emoji
+        // Each 🤠 is 4 bytes. Fill enough to force truncation at an emoji boundary.
+        let emoji_name: String = "🤠".repeat(60); // 240 bytes, exceeds MAX_LENGTH
+        let mut chat = fake_chat();
+        chat.display_name = Some(emoji_name);
+
+        // Should not panic, and the result should be valid UTF-8
+        let filename = app.filename(&chat);
+        assert!(filename.len() <= MAX_LENGTH + 20); // suffix " - 0.html" adds some
+        // Verify it's valid UTF-8 (would fail to compile/run if not)
+        assert!(filename.ends_with(".html"));
+    }
+
+    #[test]
+    fn can_get_filename_single_long_emoji() {
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let mut app = Config::fake_app(options);
+
+        // Create a participant with a name full of 4-byte emoji
+        let emoji_name: String = "🌍".repeat(60); // 240 bytes
+        app.participants.insert(10, Name::fake_name(&emoji_name));
+        app.real_participants.insert(10, 10);
+
+        let mut people = BTreeSet::new();
+        people.insert(10);
+
+        // Should not panic and should produce valid UTF-8
+        let filename = app.filename_from_participants(&people);
+        assert!(filename.len() <= MAX_LENGTH);
+        // Verify the truncation happened on a char boundary
+        for c in filename.chars() {
+            assert!(c == '🌍');
+        }
+    }
+
+    #[test]
+    fn can_get_filename_multiple_long_emoji() {
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let mut app = Config::fake_app(options);
+
+        // Create participants with emoji names long enough to trigger the "and N others" truncation
+        for i in 10..18 {
+            let emoji_name: String = "🎵".repeat(30); // 120 bytes each
+            app.participants.insert(i, Name::fake_name(&emoji_name));
+            app.real_participants.insert(i, i);
+        }
+
+        let mut people = BTreeSet::new();
+        for i in 10..18 {
+            people.insert(i);
+        }
+
+        // Should not panic and should produce valid UTF-8 within the length limit
+        let filename = app.filename_from_participants(&people);
+        assert!(filename.len() <= MAX_LENGTH);
+    }
+
+    #[test]
+    fn can_get_filename_cjk_truncation() {
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let mut app = Config::fake_app(options);
+
+        // CJK characters are 3 bytes each; test truncation mid-character
+        let cjk_name: String = "你".repeat(80); // 240 bytes
+        app.participants.insert(10, Name::fake_name(&cjk_name));
+        app.real_participants.insert(10, 10);
+
+        let mut people = BTreeSet::new();
+        people.insert(10);
+
+        let filename = app.filename_from_participants(&people);
+        assert!(filename.len() <= MAX_LENGTH);
+        // All characters should be valid
+        for c in filename.chars() {
+            assert!(c == '你');
+        }
     }
 }
 
