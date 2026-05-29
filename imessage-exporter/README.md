@@ -63,7 +63,7 @@ The [releases page](https://github.com/ReagentX/imessage-exporter/releases) prov
         Specify an optional custom path for the iMessage database location
         For macOS, specify a path to a `chat.db` file
         For iOS, specify a path to the root of a device backup directory
-        If the iOS backup is encrypted, --cleartext-password must be passed
+        If the iOS backup is encrypted, --cleartext-password can be passed or you will be prompted for the password
         If omitted, the default directory is ~/Library/Messages/chat.db
         
 -r, --attachment-root <path/to/messages/root>
@@ -116,12 +116,20 @@ The [releases page](https://github.com/ReagentX/imessage-exporter/releases) prov
 -x, --cleartext-password <password>
         Optional password for encrypted iOS backups
         This is only used when the source is an encrypted iOS backup directory
+        If omitted on an encrypted backup, you will be prompted for the password (recommended)
+        A password provided with this option is visible on screen, in the process table, and in your shell history
         
 -n, --contacts-path <path>
         Optional custom path for a macOS or iOS contacts database file
         This should be resolved automatically, but can be manually provided
         Handles from the messages table will be mapped to names in the provided database
         Generally, one of `AddressBook-v22.abcddb` or `AddressBook.sqlitedb`
+        
+    --no-progress
+        Disable the on-screen progress bar regardless of context
+        By default, the progress bar is shown only when stderr is a terminal,
+        so headless invocations (CI, output redirected to a logfile) stay clean automatically.
+        Use this flag to suppress the bar even in an interactive terminal.
         
 -h, --help
         Print help
@@ -243,7 +251,7 @@ For example, to prevent messages from breaking across pages when printing:
 }
 ```
 
-The default styles can be viewed [here](/imessage-exporter/src/exporters/resources/style.css).
+The default styles can be viewed [here](src/exporters/html/resources/style.css).
 
 ### PDF Exports
 

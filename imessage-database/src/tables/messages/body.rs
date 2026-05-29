@@ -170,8 +170,9 @@ pub fn parse_body_typedstream<'a>(
             }
         }
     }
-    // If we have no components, return None
-    (!out_v.is_empty()).then_some(ParseResult {
+    // Return None only when nothing useful was extracted. `Some("")` is a
+    // valid result.
+    (!out_v.is_empty() || message_text.is_some()).then_some(ParseResult {
         components: out_v,
         text: message_text,
     })
@@ -457,7 +458,7 @@ mod typedstream_tests {
         let typedstream_path = current_dir()
             .unwrap()
             .as_path()
-            .join("test_data/typedstream/Multipart");
+            .join("test_data/typedstream/MultiPart");
         let mut file = File::open(typedstream_path).unwrap();
         let mut bytes = vec![];
         file.read_to_end(&mut bytes).unwrap();
@@ -586,13 +587,13 @@ mod typedstream_tests {
                     edit_history: vec![
                         EditedEvent::new(
                             743907435000000000,
-                            Some("Second test".to_string()),
+                            "Second test".to_string(),
                             vec![],
                             None,
                         ),
                         EditedEvent::new(
                             743907448000000000,
-                            Some("Second test was edited!".to_string()),
+                            "Second test was edited!".to_string(),
                             vec![],
                             None,
                         ),
@@ -676,7 +677,7 @@ mod typedstream_tests {
                 edit_history: vec![
                     EditedEvent {
                         date: 758573156000000000,
-                        text: Some("Test".to_string()),
+                        text: "Test".to_string(),
                         components: vec![BubbleComponent::Text(vec![TextAttributes {
                             start: 0,
                             end: 4,
@@ -686,7 +687,7 @@ mod typedstream_tests {
                     },
                     EditedEvent {
                         date: 758573166000000000,
-                        text: Some("Test".to_string()),
+                        text: "Test".to_string(),
                         components: vec![BubbleComponent::Text(vec![TextAttributes {
                             start: 0,
                             end: 4,

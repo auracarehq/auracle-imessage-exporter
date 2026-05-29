@@ -27,13 +27,13 @@ use imessage_database::{
 };
 
 use crate::{
-    Exporter, HTML, TXT,
+    HTML, TXT,
     app::{
         compatibility::attachment_manager::AttachmentManagerMode, contacts::Name,
         data_source::DataSource, error::RuntimeError, export_type::ExportType, options::Options,
         sanitizers::sanitize_filename,
     },
-    exporters::exporter::ATTACHMENT_NO_FILENAME,
+    exporters::shared::driver::run_export,
 };
 
 // Maximum length for filenames
@@ -120,7 +120,7 @@ impl Config {
                 .unwrap_or_else(|| {
                     attachment
                         .filename()
-                        .unwrap_or(ATTACHMENT_NO_FILENAME)
+                        .unwrap_or("Attachment missing name metadata!")
                         .to_string()
                 }),
         }
@@ -199,10 +199,9 @@ impl Config {
                 None => UNKNOWN,
             };
 
-            if participant_details.len() + out_s.len() < max_len {
-                if !out_s.is_empty() {
-                    out_s.push_str(", ");
-                }
+            let separator = if out_s.is_empty() { "" } else { ", " };
+            if participant_details.len() + separator.len() + out_s.len() <= max_len {
+                out_s.push_str(separator);
                 out_s.push_str(participant_details);
                 added += 1;
             } else {
@@ -346,12 +345,12 @@ impl Config {
         // Export size is usually about 6% the size of the db;
         // we divide by 10 to over-estimate about 10% of the total size
         // for some safe headroom
-        let total_db_size = get_db_size(Path::new(
-            self.data_source
-                .db()
-                .path()
-                .ok_or(RuntimeError::FileNameError)?,
-        ))?;
+        let total_db_size = get_db_size(Path::new(self.data_source.db().path().ok_or_else(
+            || RuntimeError::FileNameError {
+                path: self.options.db_path.clone(),
+                reason: "database connection has no associated path",
+            },
+        )?))?;
         let mut estimated_export_size = total_db_size / 10;
 
         let free_space_at_location = available_space(&self.options.export_path)?;
@@ -491,12 +490,12 @@ impl Config {
         // Global Diagnostics
         println!("Global diagnostic data:");
 
-        let total_db_size = get_db_size(Path::new(
-            self.data_source
-                .db()
-                .path()
-                .ok_or(RuntimeError::FileNameError)?,
-        ))?;
+        let total_db_size = get_db_size(Path::new(self.data_source.db().path().ok_or_else(
+            || RuntimeError::FileNameError {
+                path: self.options.db_path.clone(),
+                reason: "database connection has no associated path",
+            },
+        )?))?;
         println!(
             "    Total database size: {}",
             format_file_size(total_db_size)
@@ -562,10 +561,10 @@ impl Config {
             // Create exporter, pass it data we care about, then kick it off
             match export_type {
                 ExportType::Html => {
-                    HTML::new(self)?.iter_messages()?;
+                    run_export(&mut HTML::new(self)?)?;
                 }
                 ExportType::Txt => {
-                    TXT::new(self)?.iter_messages()?;
+                    run_export(&mut TXT::new(self)?)?;
                 }
             }
         }
@@ -686,7 +685,7 @@ mod filename_tests {
 
     use imessage_database::tables::chat::Chat;
 
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
 
     pub fn fake_chat() -> Chat {
         Chat {
@@ -732,6 +731,7 @@ mod filename_tests {
     fn can_get_filename_long_multiple() {
         let options = Options::fake_options(crate::app::export_type::ExportType::Html);
         let mut app = Config::fake_app(options);
+        app.options.export_path = PathBuf::from("/tmp");
 
         // Create participant data
         app.participants.insert(
@@ -796,6 +796,7 @@ mod filename_tests {
     fn can_get_filename_single_long() {
         let options = Options::fake_options(crate::app::export_type::ExportType::Html);
         let mut app = Config::fake_app(options);
+        app.options.export_path = PathBuf::from("/tmp");
 
         // Create participant data
         app.participants.insert(10, Name::fake_name("He slipped his key into the lock, and we all very quietly entered the cell. The sleeper half turned, and then settled down once more into a deep slumber. Holmes stooped to the water-jug, moistened his sponge, and then rubbed it twice vigorously across and down the prisoner's face."));
@@ -812,9 +813,37 @@ mod filename_tests {
     }
 
     #[test]
+    fn can_get_filename_respects_separator_length() {
+        let options = Options::fake_options(crate::app::export_type::ExportType::Html);
+        let mut app = Config::fake_app(options);
+
+        let export_path_len = app.options.export_path.as_os_str().len();
+        let max_len = MAX_LENGTH.saturating_sub(export_path_len + 1);
+
+        // P + N = max_len - 1 passes the raw-bytes check; pushing ", " would overflow.
+        let first_len = max_len / 2;
+        let second_len = max_len - first_len - 1;
+        let first = "a".repeat(first_len);
+        let second = "b".repeat(second_len);
+
+        app.participants.insert(10, Name::fake_name(&first));
+        app.participants.insert(11, Name::fake_name(&second));
+        app.real_participants.insert(10, 10);
+        app.real_participants.insert(11, 11);
+
+        let mut people = BTreeSet::new();
+        people.insert(10);
+        people.insert(11);
+
+        let actual = app.filename_from_participants(&people);
+        assert!(actual.len() <= max_len);
+    }
+
+    #[test]
     fn can_get_filename_chat_display_name_long() {
         let options = Options::fake_options(crate::app::export_type::ExportType::Html);
-        let app = Config::fake_app(options);
+        let mut app = Config::fake_app(options);
+        app.options.export_path = PathBuf::from("/tmp");
 
         // Create chat
         let mut chat = fake_chat();

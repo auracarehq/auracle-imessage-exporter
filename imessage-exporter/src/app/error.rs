@@ -1,14 +1,19 @@
 /*!
- Errors that can happen during the application's runtime.
+ Errors surfaced anywhere from CLI startup through per-message formatting.
 */
 
 use std::{
+    error::Error,
     fmt::{Display, Formatter, Result},
     io::Error as IoError,
+    path::PathBuf,
 };
 
 use crabapple::error::BackupError;
-use imessage_database::{error::table::TableError, util::size::format_file_size};
+use imessage_database::{
+    error::{message::MessageError, table::TableError},
+    util::size::format_file_size,
+};
 
 use crate::app::options::OPTION_BYPASS_FREE_SPACE_CHECK;
 
@@ -18,9 +23,10 @@ pub enum RuntimeError {
     InvalidOptions(String),
     DiskError(IoError),
     DatabaseError(TableError),
+    MessageError(MessageError),
     BackupError(BackupError),
     NotEnoughAvailableSpace(u64, u64),
-    FileNameError,
+    FileNameError { path: PathBuf, reason: &'static str },
 }
 
 impl Display for RuntimeError {
@@ -29,6 +35,7 @@ impl Display for RuntimeError {
             RuntimeError::InvalidOptions(why) => write!(fmt, "Invalid options!\n{why}"),
             RuntimeError::DiskError(why) => write!(fmt, "{why}"),
             RuntimeError::DatabaseError(why) => write!(fmt, "{why}"),
+            RuntimeError::MessageError(why) => write!(fmt, "{why}"),
             RuntimeError::NotEnoughAvailableSpace(estimated_bytes, available_bytes) => {
                 write!(
                     fmt,
@@ -38,7 +45,23 @@ impl Display for RuntimeError {
                 )
             }
             RuntimeError::BackupError(why) => write!(fmt, "{why}"),
-            RuntimeError::FileNameError => write!(fmt, "Invalid file name!"),
+            RuntimeError::FileNameError { path, reason } => {
+                write!(fmt, "Invalid file name at {}: {reason}", path.display())
+            }
+        }
+    }
+}
+
+impl Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            RuntimeError::DiskError(why) => Some(why),
+            RuntimeError::DatabaseError(why) => Some(why),
+            RuntimeError::MessageError(why) => Some(why),
+            RuntimeError::BackupError(why) => Some(why),
+            RuntimeError::InvalidOptions(_)
+            | RuntimeError::NotEnoughAvailableSpace(_, _)
+            | RuntimeError::FileNameError { .. } => None,
         }
     }
 }
@@ -46,6 +69,12 @@ impl Display for RuntimeError {
 impl From<TableError> for RuntimeError {
     fn from(err: TableError) -> Self {
         RuntimeError::DatabaseError(err)
+    }
+}
+
+impl From<MessageError> for RuntimeError {
+    fn from(err: MessageError) -> Self {
+        RuntimeError::MessageError(err)
     }
 }
 
