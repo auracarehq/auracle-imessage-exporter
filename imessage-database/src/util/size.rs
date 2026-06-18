@@ -1,13 +1,13 @@
 /*!
-Contains logic for creating human-readable file size strings.
+ Human-readable file size formatting.
 */
 
 const DIVISOR: f64 = 1024.;
 const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
 
-/// Get a human readable file size for an arbitrary amount of bytes
+/// Format a byte count with a binary unit suffix.
 ///
-// # Example:
+/// # Example:
 ///
 /// ```
 /// use imessage_database::util::size::format_file_size;

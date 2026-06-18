@@ -14,12 +14,11 @@ const BAR_FILL: char = '#';
 const BAR_ARROW: char = '>';
 const BAR_EMPTY: char = ' ';
 
-const HUMAN_COUNT_THRESHOLDS: [(u64, &str); 5] = [
+const HUMAN_COUNT_THRESHOLDS: [(u64, &str); 4] = [
     (1_000_000_000_000, "T"), // trillion
     (1_000_000_000, "B"),     // billion
     (1_000_000, "M"),         // million
     (1_000, "k"),             // thousand
-    (0, ""),                  // no suffix
 ];
 
 /// Format a number with comma separators
@@ -64,7 +63,7 @@ pub struct ExportProgress {
 }
 
 impl ExportProgress {
-    /// Creates a new hidden progress bar. Pass `enabled = false` to make
+    /// Build a hidden progress bar. Pass `enabled = false` to make
     /// every subsequent method call a no-op.
     pub fn new(enabled: bool) -> Self {
         Self {
@@ -76,7 +75,7 @@ impl ExportProgress {
         }
     }
 
-    /// Starts the progress bar with the specified total length
+    /// Start the progress bar with the specified total length.
     pub fn start(&self, length: i64) {
         if !self.enabled {
             return;
@@ -87,7 +86,7 @@ impl ExportProgress {
         self.draw();
     }
 
-    /// Sets the progress bar to default style (clears any busy message)
+    /// Clear any busy message and draw the default progress style.
     pub fn set_default_style(&self) {
         if !self.enabled {
             return;
@@ -96,7 +95,7 @@ impl ExportProgress {
         self.draw();
     }
 
-    /// Sets the progress bar to busy style with a message
+    /// Draw the busy progress style with a message.
     pub fn set_busy_style(&self, message: String) {
         if !self.enabled {
             return;
@@ -105,7 +104,7 @@ impl ExportProgress {
         self.draw();
     }
 
-    /// Sets the position of the progress bar
+    /// Set the progress bar position.
     pub fn set_position(&self, pos: u64) {
         if !self.enabled {
             return;

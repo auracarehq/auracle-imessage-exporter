@@ -2,8 +2,8 @@
 [Handwritten](https://support.apple.com/en-us/HT206894) messages are animated doodles or messages sent in your own handwriting.
 */
 
-use std::fmt::Write;
-use std::io::Cursor;
+use std::io::{Cursor, ErrorKind};
+use std::{fmt::Write, io::Error};
 
 use crate::{
     error::handwriting::HandwritingError,
@@ -18,26 +18,26 @@ use protobuf::Message;
 /// `com.apple.Handwriting.HandwritingProvider`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct HandwrittenMessage {
-    /// Unique identifier for the handwritten message
+    /// Unique identifier for the handwritten message.
     pub id: String,
-    /// Timestamp for when the handwritten message was created, stored as a unix timestamp with an epoch of `2001-01-01 00:00:00` in the local time zone
+    /// Timestamp for when the handwritten message was created, stored as a unix timestamp with an epoch of `2001-01-01 00:00:00` in the local time zone.
     pub created_at: i64,
-    /// Height of the handwritten message in pixels
+    /// Render height in pixels.
     pub height: u16,
-    /// Width of the handwritten message in pixels
+    /// Render width in pixels.
     pub width: u16,
-    /// Collection of strokes that make up the handwritten image
+    /// Strokes that make up the handwritten image.
     pub strokes: Vec<Vec<Point>>,
 }
 
-/// Represents a point along a handwritten line.
+/// Point along a handwritten line.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Point {
-    /// X-coordinate of the point
+    /// X-coordinate of the point.
     pub x: u16,
-    /// Y-coordinate of the point
+    /// Y-coordinate of the point.
     pub y: u16,
-    /// Width of the stroke at this point
+    /// Stroke width at this point.
     pub width: u16,
 }
 
@@ -58,7 +58,7 @@ impl HandwrittenMessage {
         })
     }
 
-    /// Renders the handwriting message as an `svg` graphic.
+    /// Render the handwriting message as SVG.
     #[must_use]
     pub fn render_svg(&self) -> String {
         let mut svg = String::new();
@@ -86,7 +86,7 @@ impl HandwrittenMessage {
         svg
     }
 
-    /// Renders the handwriting message as an ASCII graphic with a maximum height.
+    /// Render the handwriting message as ASCII with a maximum height.
     #[must_use]
     pub fn render_ascii(&self, max_height: usize) -> String {
         // Create a blank canvas filled with spaces
@@ -111,7 +111,6 @@ impl HandwrittenMessage {
             });
         }
 
-        // Convert the canvas to a string
         let mut output = String::with_capacity(h * (w + 1));
         for row in canvas {
             for &ch in &row {
@@ -160,9 +159,12 @@ fn draw_point(canvas: &mut [Vec<char>], x: i64, y: i64) {
     }
 }
 
-/// Generates svg lines from an array of strokes.
+/// Write SVG polylines for the parsed strokes.
 fn generate_strokes(svg: &mut String, strokes: &[Vec<Point>]) {
     for stroke in strokes {
+        if stroke.is_empty() {
+            continue;
+        }
         let mut segments = String::with_capacity(80 * (stroke.len() - 1));
         for (width, points) in &group_points(stroke) {
             let mut points_svg = String::with_capacity(points.len() * 3);
@@ -183,9 +185,12 @@ fn generate_strokes(svg: &mut String, strokes: &[Vec<Point>]) {
     }
 }
 
-/// Group points along a stroke together by width
+/// Group adjacent stroke points by width.
 fn group_points(stroke: &[Point]) -> Vec<(u16, Vec<&Point>)> {
     let mut groups = vec![];
+    if stroke.is_empty() {
+        return groups;
+    }
     let mut curr = stroke[0].width;
     let mut segment = vec![];
 
@@ -241,7 +246,7 @@ fn resize(v: u16, box_size: u16, max_v: u16) -> u16 {
         .unwrap_or(0) as u16
 }
 
-/// Iterates through each point in each stroke and extracts the maximum `x`, `y`, and `width` values.
+/// Return the maximum `x`, `y`, and stroke-width values across all strokes.
 fn get_max_dimension(strokes: &[Vec<Point>]) -> (u16, u16, u16) {
     strokes.iter().flat_map(|stroke| stroke.iter()).fold(
         (0, 0, 0),
@@ -249,13 +254,13 @@ fn get_max_dimension(strokes: &[Vec<Point>]) -> (u16, u16, u16) {
             (
                 max_x.max(point.x),
                 max_y.max(point.y),
-                max_width.max(point.width - 1),
+                max_width.max(point.width.saturating_sub(1)),
             )
         },
     )
 }
 
-/// Parses raw stroke data into an array of strokes.
+/// Parse raw stroke bytes into point groups.
 fn parse_strokes(msg: &BaseMessage) -> Result<Vec<Vec<Point>>, HandwritingError> {
     let data = decompress_strokes(msg)?;
 
@@ -269,6 +274,9 @@ fn parse_strokes(msg: &BaseMessage) -> Result<Vec<Vec<Point>>, HandwritingError>
 
         let num_points = u16::from_le_bytes([data[idx], data[idx + 1]]) as usize;
         idx += 2;
+        if num_points == 0 {
+            return Err(HandwritingError::EmptyStroke);
+        }
         if idx + (num_points * 8) > length {
             return Err(HandwritingError::InvalidStrokesLength(
                 idx + (num_points * 8),
@@ -290,29 +298,59 @@ fn parse_strokes(msg: &BaseMessage) -> Result<Vec<Vec<Point>>, HandwritingError>
     Ok(strokes)
 }
 
-/// Decompresses raw stroke data and verifies length.
-fn decompress_strokes(msg: &BaseMessage) -> Result<Vec<u8>, HandwritingError> {
-    let data = match msg.Handwriting.Compression.enum_value_or_default() {
-        Compression::None => msg.Handwriting.Strokes.clone(),
-        Compression::XZ => {
-            let mut cursor = Cursor::new(&msg.Handwriting.Strokes);
-            let mut buf = Vec::new();
-            lzma_rs::xz_decompress(&mut cursor, &mut buf).map_err(HandwritingError::XZError)?;
-            buf
-        }
-        Compression::Unknown => {
-            return Err(HandwritingError::CompressionUnknown);
-        }
-    };
+/// Hard ceiling on decompressed handwriting stroke data, independent of the
+/// attacker-controlled `DecompressedLength`, so a crafted XZ payload cannot
+/// force an unbounded allocation. Real handwriting payloads are only a few KB.
+const MAX_DECOMPRESSED_STROKES: usize = 32 * 1024 * 1024;
 
-    let length = match msg.Handwriting.Compression.enum_value_or_default() {
-        Compression::None => data.len(),
+/// A sink that appends decompressed bytes to a buffer but fails once a write
+/// would exceed `limit`, so a decompression bomb is rejected mid-stream rather
+/// than fully materialized in memory.
+struct CappedBuffer {
+    buf: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for CappedBuffer {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len().saturating_add(data.len()) > self.limit {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "decompressed handwriting data exceeded the expected length",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Decompress raw stroke bytes and verify the expected length.
+fn decompress_strokes(msg: &BaseMessage) -> Result<Vec<u8>, HandwritingError> {
+    let (data, length) = match msg.Handwriting.Compression.enum_value_or_default() {
+        Compression::None => {
+            let data = msg.Handwriting.Strokes.clone();
+            let length = data.len();
+            (data, length)
+        }
         Compression::XZ => {
-            if let Some(decompress_size) = msg.Handwriting.DecompressedLength {
-                usize::try_from(decompress_size).map_err(|_| HandwritingError::ConversionError)?
-            } else {
-                return Err(HandwritingError::DecompressedNotSet);
-            }
+            // Bound the output up front so a crafted stream cannot expand without
+            // limit: cap at the declared length, itself clamped to a sane maximum.
+            let length = match msg.Handwriting.DecompressedLength {
+                Some(decompress_size) => usize::try_from(decompress_size)
+                    .map_err(|_| HandwritingError::ConversionError)?,
+                None => return Err(HandwritingError::DecompressedNotSet),
+            };
+            let mut cursor = Cursor::new(&msg.Handwriting.Strokes);
+            let mut sink = CappedBuffer {
+                buf: Vec::new(),
+                limit: length.min(MAX_DECOMPRESSED_STROKES),
+            };
+            lzma_rs::xz_decompress(&mut cursor, &mut sink).map_err(HandwritingError::XZError)?;
+            (sink.buf, length)
         }
         Compression::Unknown => {
             return Err(HandwritingError::CompressionUnknown);
@@ -328,7 +366,7 @@ fn decompress_strokes(msg: &BaseMessage) -> Result<Vec<u8>, HandwritingError> {
     Ok(data)
 }
 
-/// Parses the drawing size from the protobuf message.
+/// Parse drawing dimensions from the protobuf frame.
 fn parse_dimensions(msg: &BaseMessage) -> Result<(u16, u16), HandwritingError> {
     let rect = &msg.Handwriting.Frame;
     if rect.len() != 8 {
@@ -340,7 +378,7 @@ fn parse_dimensions(msg: &BaseMessage) -> Result<(u16, u16), HandwritingError> {
     ))
 }
 
-/// Converts coordinate bytes to an u16.
+/// Decode a signed coordinate stored in two bytes.
 fn parse_coordinates(b1: u8, b2: u8) -> u16 {
     u16::from_le_bytes([b1, b2]) ^ 0x8000
 }
@@ -349,9 +387,32 @@ fn parse_coordinates(b1: u8, b2: u8) -> u16 {
 mod tests {
     use crate::message_types::handwriting::models::{HandwrittenMessage, Point};
 
+    use super::{CappedBuffer, generate_strokes, get_max_dimension, group_points, parse_strokes};
+    use crate::error::handwriting::HandwritingError;
+    use crate::message_types::handwriting::handwriting_proto::{
+        BaseMessage, Compression, Handwriting,
+    };
+    use protobuf::{EnumOrUnknown, MessageField};
+
     use std::env::current_dir;
     use std::fs::File;
     use std::io::Read;
+
+    #[test]
+    fn capped_buffer_rejects_data_beyond_limit() {
+        use std::io::Write as _;
+
+        let mut sink = CappedBuffer {
+            buf: Vec::new(),
+            limit: 4,
+        };
+        // Writing exactly up to the limit is allowed.
+        assert!(sink.write_all(b"abcd").is_ok());
+        // The next byte must be rejected rather than buffered, so a decompression
+        // bomb cannot grow the buffer past the declared/clamped length.
+        assert!(sink.write_all(b"e").is_err());
+        assert_eq!(sink.buf, b"abcd");
+    }
 
     #[test]
     fn test_parse_handwritten_from_payload() {
@@ -11232,5 +11293,86 @@ mod tests {
         expected_data.read_to_string(&mut expected).unwrap();
 
         assert_eq!(balloon.render_svg(), expected);
+    }
+
+    #[test]
+    fn parse_strokes_rejects_empty_stroke() {
+        let mut handwriting = Handwriting::new();
+        handwriting.Compression = EnumOrUnknown::new(Compression::None);
+        handwriting.Strokes = vec![0x00, 0x00];
+
+        let mut msg = BaseMessage::new();
+        msg.Handwriting = MessageField::some(handwriting);
+
+        assert!(matches!(
+            parse_strokes(&msg),
+            Err(HandwritingError::EmptyStroke)
+        ));
+    }
+
+    #[test]
+    fn group_points_handles_empty_stroke() {
+        assert!(group_points(&[]).is_empty());
+    }
+
+    #[test]
+    fn generate_strokes_skips_empty_stroke() {
+        let mut svg = String::new();
+        generate_strokes(&mut svg, &[vec![]]);
+        assert!(svg.is_empty());
+    }
+
+    #[test]
+    fn render_svg_skips_empty_strokes() {
+        let message = HandwrittenMessage {
+            id: "test".to_string(),
+            created_at: 0,
+            height: 10,
+            width: 10,
+            strokes: vec![
+                vec![],
+                vec![
+                    Point {
+                        x: 1,
+                        y: 1,
+                        width: 2,
+                    },
+                    Point {
+                        x: 5,
+                        y: 5,
+                        width: 2,
+                    },
+                ],
+                vec![],
+            ],
+        };
+
+        // Only the single non-empty stroke renders; the empty ones are skipped.
+        assert_eq!(message.render_svg().matches("<polyline").count(), 1);
+    }
+
+    #[test]
+    fn get_max_dimension_handles_zero_width_point() {
+        let strokes = vec![vec![
+            Point {
+                x: 5,
+                y: 7,
+                width: 0,
+            },
+            Point {
+                x: 1,
+                y: 1,
+                width: 3,
+            },
+        ]];
+        assert_eq!(get_max_dimension(&strokes), (5, 7, 2));
+
+        // A lone width-0 point yields `max_width` 0 rather than wrapping to u16::MAX.
+        let zero = vec![vec![Point {
+            x: 2,
+            y: 4,
+            width: 0,
+        }]];
+        assert_eq!(get_max_dimension(&zero), (2, 4, 0));
     }
 }

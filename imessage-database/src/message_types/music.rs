@@ -1,5 +1,5 @@
 /*!
- These are the link previews that iMessage generates when sending Apple Music links.
+ Apple Music link previews stored in URL balloon payloads.
 */
 
 use plist::Value;
@@ -7,31 +7,35 @@ use plist::Value;
 use crate::{
     error::plist::PlistParseError,
     message_types::variants::BalloonProvider,
-    util::plist::{get_string_from_dict, get_string_from_nested_dict, get_value_from_dict},
+    util::plist::{
+        get_string_from_dict, get_string_from_nested_dict, get_value_from_dict,
+        rich_link_metadata_and_nested,
+    },
 };
 
 /// This struct is not documented by Apple, but represents messages displayed as
 /// `com.apple.messages.URLBalloonProvider` but from the Music app
 #[derive(Debug, PartialEq, Eq)]
 pub struct MusicMessage<'a> {
-    /// URL in Apple Music
+    /// Apple Music URL.
     pub url: Option<&'a str>,
-    /// URL pointing to the track preview stream
+    /// Track preview stream URL.
     pub preview: Option<&'a str>,
-    /// Artist name
+    /// Artist name.
     pub artist: Option<&'a str>,
-    /// Album name
+    /// Album name.
     pub album: Option<&'a str>,
-    /// Track name
+    /// Track name.
     pub track_name: Option<&'a str>,
-    /// Included lyrics, if any
+    /// Included lyric lines.
     pub lyrics: Option<Vec<&'a str>>,
 }
 
 impl<'a> BalloonProvider<'a> for MusicMessage<'a> {
     fn from_map(payload: &'a Value) -> Result<Self, PlistParseError> {
-        if let Ok((music_metadata, body)) = MusicMessage::get_body_and_url(payload) {
-            // Ensure the message is a Music message
+        if let Ok((body, music_metadata)) = rich_link_metadata_and_nested(payload, "specialization")
+        {
+            // Music payloads carry album metadata.
             if get_string_from_dict(music_metadata, "album").is_none() {
                 return Err(PlistParseError::WrongMessageType);
             }
@@ -48,31 +52,6 @@ impl<'a> BalloonProvider<'a> for MusicMessage<'a> {
             });
         }
         Err(PlistParseError::NoPayload)
-    }
-}
-
-impl<'a> MusicMessage<'a> {
-    /// Extract the main dictionary of data from the body of the payload
-    ///
-    /// Apple Music stores the URL under `richLinkMetadata` like a normal URL, but has some
-    /// extra data stored under `specialization` that contains the track information.
-    fn get_body_and_url(payload: &'a Value) -> Result<(&'a Value, &'a Value), PlistParseError> {
-        let base = payload
-            .as_dictionary()
-            .ok_or_else(|| {
-                PlistParseError::InvalidType("root".to_string(), "dictionary".to_string())
-            })?
-            .get("richLinkMetadata")
-            .ok_or_else(|| PlistParseError::MissingKey("richLinkMetadata".to_string()))?;
-        Ok((
-            base.as_dictionary()
-                .ok_or_else(|| {
-                    PlistParseError::InvalidType("root".to_string(), "dictionary".to_string())
-                })?
-                .get("specialization")
-                .ok_or_else(|| PlistParseError::MissingKey("specialization".to_string()))?,
-            base,
-        ))
     }
 }
 

@@ -11,7 +11,7 @@ use crate::{
             driver::{ExportState, MessageWriter},
             edited::{EditDiff, normalize_edited},
             message::MessageContext,
-            part::dispatch_part_body,
+            part::{AttachmentResolver, dispatch_part_body, resolve_run},
             render::{render_template, render_template_into},
             reply::{build_replies, build_tapbacks},
             tapback::resolve_tapback,
@@ -26,7 +26,7 @@ use imessage_database::{
         attachment::Attachment,
         messages::{
             Message,
-            models::{AttachmentMeta, SharedLocation, TextAttributes},
+            models::{AttachmentMeta, AttributedRange, SharedLocation},
         },
         table::YOU,
     },
@@ -43,6 +43,8 @@ use view_model::{
 /// Indentation prepended to every line of a reply rendered inside its
 /// parent message's body. Top-level messages render at zero indent.
 const REPLY_INDENT: &str = "    ";
+
+const ATTACHMENT_MISSING_TEXT: &str = "Attachment missing!";
 
 pub struct TXT<'a> {
     /// Data that is setup from the application's runtime
@@ -155,12 +157,7 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
         message: &'a Message,
         attachments: &mut Vec<Attachment>,
     ) -> Result<String, RuntimeError> {
-        Ok(dispatch_app_balloon(
-            self,
-            message,
-            attachments,
-            self.config,
-        )?)
+        dispatch_app_balloon(self, message, attachments, self.config)
     }
 
     fn format_tapback(&self, msg: &Message) -> Result<String, RuntimeError> {
@@ -191,10 +188,14 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
     }
 
     fn format_edited(
-        &self,
+        &'a self,
         msg: &'a Message,
         edited_message: &'a EditedMessage,
         message_part_idx: usize,
+        // Plain text can't embed media, so the edit history keeps the parsed
+        // `\u{FFFC}` placeholder rather than inlining the sticker image.
+        _attachments: &'a mut Vec<Attachment>,
+        _resolver: &mut AttachmentResolver,
     ) -> Option<String> {
         let kind = normalize_edited(msg, edited_message, message_part_idx, self.config, YOU)?
             .map_rows(|event| {
@@ -217,23 +218,80 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
         Some(render_template(&EditedVM { kind }))
     }
 
-    fn format_attributes(&self, text: &str, attributes: &[TextAttributes]) -> String {
+    fn format_attributes(&self, text: &str, ranges: &[AttributedRange]) -> String {
         let mut formatted_text = String::with_capacity(text.len());
         let mut prev_start = 0;
         let mut prev_end = 0;
 
-        for effect in attributes {
-            if prev_start == effect.start && prev_end == effect.end {
+        for range in ranges {
+            // Attachment ranges carry no text of their own.
+            if range.attachment.is_some() {
                 continue;
             }
-            if let Some(message_content) = text.get(effect.start..effect.end) {
-                prev_start = effect.start;
-                prev_end = effect.end;
+            if prev_start == range.start && prev_end == range.end {
+                continue;
+            }
+            if let Some(message_content) = text.get(range.start..range.end) {
+                prev_start = range.start;
+                prev_end = range.end;
                 // There isn't really a way to represent formatted text in a plain text export
                 formatted_text.push_str(message_content);
             }
         }
         formatted_text
+    }
+
+    fn render_run(
+        &'a self,
+        message: &'a Message,
+        ranges: &'a [AttributedRange],
+        attachments: &'a mut Vec<Attachment>,
+        resolver: &mut AttachmentResolver,
+    ) -> <Self as PartBodyBuilder>::Body {
+        let text = message.text.as_deref().unwrap_or_default();
+
+        // A run with no attachment ranges is a plain text bubble, rendered
+        // exactly as the pre-refactor text component was, translation included.
+        if ranges.iter().all(|range| range.attachment.is_none()) {
+            let formatted = {
+                let attr_text = self.format_attributes(text, ranges);
+                if attr_text.is_empty() {
+                    self.body_escape(text)
+                } else {
+                    attr_text
+                }
+            };
+            return self.body_text_with_translation(message, formatted);
+        }
+
+        // Otherwise the run mixes text and/or attachments. Resolve attachment
+        // ranges to their attachments (GUID-first, positional fallback) and
+        // render each range as its own line, joined one-per-range, surfacing the
+        // translation (if any) through the same shared helper as the pure-text
+        // path so a translated sticker-bearing message keeps its translation.
+        let mut lines: Vec<String> = Vec::with_capacity(ranges.len());
+        for (range, idx) in resolve_run(ranges, resolver) {
+            if let (Some(meta), Some(idx)) = (range.attachment.as_ref(), idx) {
+                let line = match attachments.get_mut(idx) {
+                    Some(attachment) if attachment.is_sticker => {
+                        self.format_sticker(attachment, message)
+                    }
+                    Some(attachment) => match self.format_attachment(attachment, message, meta) {
+                        AttachmentRender::Embedded(content) => content,
+                        AttachmentRender::MissingFilename => ATTACHMENT_MISSING_TEXT.to_string(),
+                        AttachmentRender::NamedFile(name) => name,
+                    },
+                    None => ATTACHMENT_MISSING_TEXT.to_string(),
+                };
+                lines.push(line);
+            } else {
+                let segment = self.format_attributes(text, std::slice::from_ref(range));
+                if !segment.is_empty() {
+                    lines.push(segment);
+                }
+            }
+        }
+        self.body_text_with_translation(message, lines.join("\n"))
     }
 
     fn format_message_into(
@@ -243,7 +301,7 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
         out: &mut String,
     ) -> Result<(), RuntimeError> {
         let mut ctx = MessageContext::resolve(message, self.config.data_source.db())?;
-        let mut attachment_index: usize = 0;
+        let mut resolver = AttachmentResolver::new(&ctx.attachments);
 
         let mut parts = Vec::with_capacity(message.components.len());
         for (idx, message_part) in message.components.iter().enumerate() {
@@ -253,7 +311,7 @@ impl<'a> MessageFormatter<'a> for TXT<'a> {
                 idx,
                 message_part,
                 &mut ctx.attachments,
-                &mut attachment_index,
+                &mut resolver,
             );
             parts.push(MessagePartVM {
                 body,
@@ -339,7 +397,7 @@ impl PartBodyBuilder for TXT<'_> {
 
     fn body_attachment_missing(&self) -> Self::Body {
         PartBody::Line {
-            text: "Attachment missing!".to_string(),
+            text: ATTACHMENT_MISSING_TEXT.to_string(),
         }
     }
 
@@ -412,10 +470,10 @@ mod tests {
         exporters::formatter::{AttachmentRender, MessageFormatter, RenderContext},
     };
     use imessage_database::{
-        message_types::text_effects::TextEffect,
+        message_types::text_effects::text_effect::TextEffect,
         tables::{
-            messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
-            table::ME,
+            messages::models::{AttachmentMeta, AttributedRange, BubbleComponent},
+            table::{FITNESS_RECEIVER, ME},
         },
         util::{dirs::home, platform::Platform},
     };
@@ -430,12 +488,10 @@ mod tests {
 
     #[test]
     fn can_get_time_valid() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
-        // Create fake message
         let mut message = Config::fake_message();
         // May 17, 2022  8:29:42 PM
         message.date = 674526582885055488;
@@ -452,12 +508,10 @@ mod tests {
 
     #[test]
     fn can_get_time_invalid() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
-        // Create fake message
         let mut message = Config::fake_message();
         // May 17, 2022  9:30:31 PM
         message.date = 674530231992568192;
@@ -470,7 +524,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_me_normal() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -490,6 +543,33 @@ mod tests {
             .format_message_into(&message, RenderContext::TopLevel, &mut actual)
             .unwrap();
         let expected = "May 17, 2022  5:29:42 PM\nMe\nHello world\n\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_fitness_receiver_rewrite() {
+        // A Fitness transcript message whose body begins with the
+        // `FITNESS_RECEIVER` sentinel must render as "You", matching HTML.
+        let options = Options::fake_options(ExportType::Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some(format!("{FITNESS_RECEIVER} closed all three rings"));
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+        message
+            .generate_text_legacy(config.data_source.db())
+            .unwrap();
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        let expected = "May 17, 2022  5:29:42 PM\nMe\nYou closed all three rings\n\n";
 
         assert_eq!(actual, expected);
     }
@@ -559,7 +639,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_me_normal_deleted() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -585,7 +664,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_me_normal_read() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -613,7 +691,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_them_normal() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -642,7 +719,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_them_normal_read() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -675,7 +751,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_from_them_custom_name_read() {
-        // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.custom_name = Some("Name".to_string());
         let mut config = Config::fake_app(options);
@@ -709,7 +784,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_shareplay() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -733,7 +807,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_announcement() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -756,7 +829,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_announcement_custom_name() {
-        // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.custom_name = Some("Name".to_string());
         let mut config = Config::fake_app(options);
@@ -835,7 +907,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_removed() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -863,7 +934,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_removed_other() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -894,7 +964,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_changed_number() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -923,7 +992,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_added() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -951,7 +1019,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_left() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -975,7 +1042,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_icon_removed() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -1000,7 +1066,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_group_icon_added() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -1025,7 +1090,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_chat_background_removed() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -1050,7 +1114,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_chat_background_added() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -1075,7 +1138,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_audio_message_kept() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -1098,7 +1160,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_me() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.participants.insert(0, Name::fake_name(ME));
@@ -1120,7 +1181,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_them() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -1145,7 +1205,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_custom_emoji() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -1170,7 +1229,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_custom_sticker() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -1195,7 +1253,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_custom_sticker_exists() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -1225,7 +1282,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_tapback_custom_sticker_removed() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config
@@ -1251,7 +1307,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_started_sharing_location_me() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1274,7 +1329,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_stopped_sharing_location_me() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1297,7 +1351,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_started_sharing_location_them() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1321,7 +1374,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_stopped_sharing_location_them() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1345,7 +1397,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_macos() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1365,7 +1416,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_macos_invalid_disabled() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1384,7 +1434,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_macos_invalid_clone() {
-        // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.attachment_manager.mode = AttachmentManagerMode::Clone;
 
@@ -1405,7 +1454,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_ios() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.options.platform = Platform::iOS;
@@ -1426,7 +1474,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_ios_invalid_disabled() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
         config.options.platform = Platform::iOS;
@@ -1447,7 +1494,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_ios_invalid_clone() {
-        // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.attachment_manager.mode = AttachmentManagerMode::Clone;
 
@@ -1470,7 +1516,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_sticker() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
 
         let mut config = Config::fake_app(options);
@@ -1507,7 +1552,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_sticker_genmoji() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
 
         let mut config = Config::fake_app(options);
@@ -1545,7 +1589,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_sticker_app() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
 
         let mut config = Config::fake_app(options);
@@ -1587,7 +1630,10 @@ mod tests {
         // `dispatch_part_body` returned without advancing `attachment_index`,
         // so both parts re-resolved `attachments[0]` and the first sticker
         // rendered at every slot.
-        use crate::exporters::{shared::part::dispatch_part_body, txt::view_model::PartBody};
+        use crate::exporters::{
+            shared::part::{AttachmentResolver, dispatch_part_body},
+            txt::view_model::PartBody,
+        };
 
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1627,8 +1673,12 @@ mod tests {
         );
 
         let mut attachments = vec![sticker_a, sticker_b];
-        let part = BubbleComponent::Attachment(AttachmentMeta::default());
-        let mut attachment_index: usize = 0;
+        let part = BubbleComponent::Run(vec![AttributedRange::attachment(
+            0,
+            3,
+            AttachmentMeta::default(),
+        )]);
+        let mut resolver = AttachmentResolver::new(&attachments);
 
         let first = dispatch_part_body(
             &exporter,
@@ -1636,9 +1686,8 @@ mod tests {
             0,
             &part,
             &mut attachments,
-            &mut attachment_index,
+            &mut resolver,
         );
-        assert_eq!(attachment_index, 1);
         let PartBody::Line { text: first_text } = first else {
             panic!("expected PartBody::Line for sticker arm");
         };
@@ -1652,9 +1701,8 @@ mod tests {
             1,
             &part,
             &mut attachments,
-            &mut attachment_index,
+            &mut resolver,
         );
-        assert_eq!(attachment_index, 2);
         let PartBody::Line { text: second_text } = second else {
             panic!("expected PartBody::Line for sticker arm");
         };
@@ -1664,12 +1712,85 @@ mod tests {
     }
 
     #[test]
+    fn translated_mixed_run_keeps_translation() {
+        use crate::exporters::{
+            shared::part::{AttachmentResolver, dispatch_part_body},
+            txt::view_model::PartBody,
+        };
+
+        let options = Options::fake_options(ExportType::Txt);
+        let mut config = Config::fake_app(options);
+        config
+            .translated_messages
+            .insert("56FE94B9-2345-4A3C-A57F-949BDDDDF9FF".to_string());
+        config.participants.insert(0, Name::fake_name(ME));
+        config.real_participants.insert(0, 0);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        message.guid = "56FE94B9-2345-4A3C-A57F-949BDDDDF9FF".to_string();
+        message.rowid = 548216; // row carrying the translation in test.db
+        message.text = Some("Look \u{FFFC}".to_string());
+
+        let sticker_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/stickers/outline.heic");
+        let mut sticker = Config::fake_attachment();
+        sticker.rowid = 3;
+        sticker.is_sticker = true;
+        sticker.filename = Some(sticker_path.to_string_lossy().to_string());
+        sticker.copied_path = Some(
+            config
+                .options
+                .export_path
+                .join("imessage-database/test_data/stickers/outline.heic"),
+        );
+
+        let mut attachments = vec![sticker];
+        let part = BubbleComponent::Run(vec![
+            AttributedRange::text(0, 5, vec![TextEffect::Default]),
+            AttributedRange::inline_attachment(5, 8, AttachmentMeta::default()),
+        ]);
+        let mut resolver = AttachmentResolver::new(&attachments);
+
+        let body = dispatch_part_body(
+            &exporter,
+            &message,
+            0,
+            &part,
+            &mut attachments,
+            &mut resolver,
+        );
+        let PartBody::Translated {
+            translated,
+            original,
+        } = body
+        else {
+            panic!("a translated mixed run must produce PartBody::Translated");
+        };
+        assert_eq!(translated, "Oh, il a traduit ce que j'ai envoyé !");
+        assert!(
+            original.contains("Look"),
+            "original text must survive: {original}"
+        );
+        assert!(
+            original.contains("Sticker from Me"),
+            "the sticker line must be present in the original: {original}"
+        );
+    }
+
+    #[test]
     fn dispatch_part_body_advances_index_after_sticker() {
         // Regression: when a sticker precedes a non-sticker attachment, the
         // sticker arm must advance `attachment_index` so the next part
         // resolves to the non-sticker attachment. Prior to the fix the
         // second part would re-resolve the sticker.
-        use crate::exporters::{shared::part::dispatch_part_body, txt::view_model::PartBody};
+        use crate::exporters::{
+            shared::part::{AttachmentResolver, dispatch_part_body},
+            txt::view_model::PartBody,
+        };
 
         let options = Options::fake_options(ExportType::Txt);
         let mut config = Config::fake_app(options);
@@ -1699,8 +1820,12 @@ mod tests {
         let image = Config::fake_attachment();
 
         let mut attachments = vec![sticker, image];
-        let part = BubbleComponent::Attachment(AttachmentMeta::default());
-        let mut attachment_index: usize = 0;
+        let part = BubbleComponent::Run(vec![AttributedRange::attachment(
+            0,
+            3,
+            AttachmentMeta::default(),
+        )]);
+        let mut resolver = AttachmentResolver::new(&attachments);
 
         let first = dispatch_part_body(
             &exporter,
@@ -1708,9 +1833,8 @@ mod tests {
             0,
             &part,
             &mut attachments,
-            &mut attachment_index,
+            &mut resolver,
         );
-        assert_eq!(attachment_index, 1);
         let PartBody::Line { text: first_text } = first else {
             panic!("expected PartBody::Line for sticker arm");
         };
@@ -1724,9 +1848,8 @@ mod tests {
             1,
             &part,
             &mut attachments,
-            &mut attachment_index,
+            &mut resolver,
         );
-        assert_eq!(attachment_index, 2);
         let PartBody::Line { text: second_text } = second else {
             panic!("expected PartBody::Line for attachment arm");
         };
@@ -1736,7 +1859,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_attachment_audio_transcript() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1764,7 +1886,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_single_url_no_bundle_id() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -1779,8 +1900,8 @@ mod tests {
         message.date = 674526582885055488;
         // Set the message components to a single url
         message.text = Some("https://example.com".to_string());
-        message.components = vec![BubbleComponent::Text(vec![
-                TextAttributes::new(
+        message.components = vec![BubbleComponent::Run(vec![
+                AttributedRange::text(
                     0,
                     84,
                     vec![
@@ -1805,7 +1926,6 @@ mod tests {
 
     #[test]
     fn can_format_txt_translated_message() {
-        // Create exporter
         let mut options = Options::fake_options(ExportType::Txt);
         options.attachment_manager.mode = AttachmentManagerMode::Clone;
 
@@ -2041,7 +2161,7 @@ mod balloon_format_tests {
         app::AppMessage,
         app_store::AppStoreMessage,
         collaboration::CollaborationMessage,
-        digital_touch::DigitalTouch,
+        digital_touch::DigitalTouchMessage,
         handwriting::HandwrittenMessage,
         music::MusicMessage,
         placemark::{Placemark, PlacemarkMessage},
@@ -2051,7 +2171,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_url() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2076,7 +2195,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_music() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2098,7 +2216,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_music_lyrics() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2141,7 +2258,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_collaboration() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2163,7 +2279,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_apple_pay() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2189,7 +2304,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_fitness() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2215,7 +2329,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_slideshow() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2307,7 +2420,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_find_my() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2356,7 +2468,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_check_in_timer() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2382,7 +2493,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_check_in_timer_late() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2408,7 +2518,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_accepted_check_in() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2434,7 +2543,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_app_store() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2455,8 +2563,28 @@ mod balloon_format_tests {
     }
 
     #[test]
+    fn can_format_txt_app_store_no_url_with_original_url() {
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = AppStoreMessage {
+            url: None,
+            app_name: Some("app_name"),
+            original_url: Some("original_url"),
+            description: Some("description"),
+            platform: Some("platform"),
+            genre: Some("genre"),
+        };
+
+        let actual = exporter.format_app_store(&balloon);
+        let expected = "app_name\ndescription\nplatform\ngenre\noriginal_url";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn can_format_txt_placemark() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2487,7 +2615,6 @@ mod balloon_format_tests {
 
     #[test]
     fn can_format_txt_poll() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2553,8 +2680,192 @@ mod balloon_format_tests {
     }
 
     #[test]
+    fn can_format_txt_business_quick_reply_prompt() {
+        use imessage_database::message_types::business_chat::{
+            BusinessMessage, QuickReply, QuickReplyOption,
+        };
+
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = BusinessMessage::QuickReply(QuickReply {
+            summary: Some("Choose an option".to_string()),
+            options: vec![
+                QuickReplyOption {
+                    title: "Yes".to_string(),
+                },
+                QuickReplyOption {
+                    title: "No".to_string(),
+                },
+            ],
+            selected_index: None,
+        });
+
+        let actual = exporter.format_business(&balloon);
+        let expected = "Choose an option\n- Yes\n- No";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_business_quick_reply_selected() {
+        use imessage_database::message_types::business_chat::{
+            BusinessMessage, QuickReply, QuickReplyOption,
+        };
+
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = BusinessMessage::QuickReply(QuickReply {
+            summary: Some("Replied to a question".to_string()),
+            options: vec![
+                QuickReplyOption {
+                    title: "Yes".to_string(),
+                },
+                QuickReplyOption {
+                    title: "No".to_string(),
+                },
+            ],
+            selected_index: Some(0),
+        });
+
+        let actual = exporter.format_business(&balloon);
+        let expected = "Replied to a question\n- Yes ✓\n- No";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_business_form_request() {
+        use imessage_database::message_types::business_chat::{BusinessMessage, FormRequest};
+
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = BusinessMessage::FormRequest(FormRequest {
+            title: Some("Report an Issue".to_string()),
+            subtitle: Some("Tap to get started".to_string()),
+        });
+
+        let actual = exporter.format_business(&balloon);
+        let expected = "Report an Issue\nTap to get started";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_business_form_response() {
+        use imessage_database::message_types::business_chat::{
+            BusinessMessage, FormAnswer, FormResponse,
+        };
+
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = BusinessMessage::FormResponse(FormResponse {
+            summary: Some("Here's my completed form".to_string()),
+            answers: vec![
+                FormAnswer {
+                    question: "Which option best describes your request?".to_string(),
+                    answers: vec!["The first example option".to_string()],
+                },
+                FormAnswer {
+                    question: "When did this happen?".to_string(),
+                    answers: vec!["01/01/2024".to_string()],
+                },
+                FormAnswer {
+                    question: "Anything else to add?".to_string(),
+                    answers: vec!["Example free-text response.".to_string()],
+                },
+            ],
+        });
+
+        let actual = exporter.format_business(&balloon);
+        let expected = "Here's my completed form\n- Which option best describes your request? → The first example option\n- When did this happen? → 01/01/2024\n- Anything else to add? → Example free-text response.";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_business_list_picker_prompt() {
+        use imessage_database::message_types::business_chat::{
+            BusinessMessage, ListPicker, ListPickerItem,
+        };
+
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = BusinessMessage::ListPicker(ListPicker {
+            summary: Some("Select a Product".to_string()),
+            items: vec![
+                ListPickerItem {
+                    title: "iPhone".to_string(),
+                    subtitle: None,
+                    selected: false,
+                },
+                ListPickerItem {
+                    title: "AirPods".to_string(),
+                    subtitle: Some("Wireless".to_string()),
+                    selected: false,
+                },
+                ListPickerItem {
+                    title: "Apple Watch".to_string(),
+                    subtitle: None,
+                    selected: false,
+                },
+            ],
+        });
+
+        let actual = exporter.format_business(&balloon);
+        let expected = "Select a Product\n- iPhone\n- AirPods (Wireless)\n- Apple Watch";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn can_format_txt_business_list_picker_reply() {
+        use imessage_database::message_types::business_chat::{
+            BusinessMessage, ListPicker, ListPickerItem,
+        };
+
+        let options = Options::fake_options(Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let balloon = BusinessMessage::ListPicker(ListPicker {
+            summary: Some("Select a Product".to_string()),
+            items: vec![
+                ListPickerItem {
+                    title: "iPhone".to_string(),
+                    subtitle: None,
+                    selected: true,
+                },
+                ListPickerItem {
+                    title: "AirPods".to_string(),
+                    subtitle: Some("Wireless".to_string()),
+                    selected: false,
+                },
+                ListPickerItem {
+                    title: "Apple Watch".to_string(),
+                    subtitle: None,
+                    selected: false,
+                },
+            ],
+        });
+
+        let actual = exporter.format_business(&balloon);
+        let expected = "Select a Product\n- iPhone ✓\n- AirPods (Wireless)\n- Apple Watch";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn can_format_txt_generic_app() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2589,11 +2900,22 @@ mod balloon_format_tests {
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
 
-        let msg = Config::fake_message();
-        let actual = exporter.format_digital_touch(&msg, &DigitalTouch::Kiss);
-        let expected = "Digital Touch Message: Kiss";
+        let payload_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/digital_touch_message/kiss.bin");
+        let mut payload = vec![];
+        File::open(payload_path)
+            .unwrap()
+            .read_to_end(&mut payload)
+            .unwrap();
+        let balloon = DigitalTouchMessage::from_payload(&payload).unwrap();
 
-        assert_eq!(actual, expected);
+        let msg = Config::fake_message();
+        let actual = exporter.format_digital_touch(&msg, &balloon);
+
+        assert_eq!(actual, "Digital Touch Kiss (1 kiss)");
     }
 
     #[test]
@@ -2850,8 +3172,16 @@ mod balloon_format_tests {
 #[cfg(test)]
 mod text_effect_tests {
     use imessage_database::{
-        message_types::text_effects::{Animation, Style, TextEffect, Unit},
-        tables::messages::models::{BubbleComponent, TextAttributes},
+        message_types::text_effects::{
+            animation::Animation,
+            detected::{
+                currency::DetectedCurrency, flight::Flight, shipment_tracking::ShipmentTracking,
+                unit::Unit,
+            },
+            style::Style,
+            text_effect::TextEffect,
+        },
+        tables::messages::models::{AttributedRange, BubbleComponent},
     };
 
     use crate::{
@@ -2862,7 +3192,6 @@ mod text_effect_tests {
 
     #[test]
     fn can_format_txt_text_styles_mixed_end_to_end() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2874,11 +3203,11 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        message.components = vec![BubbleComponent::Text(vec![
-            TextAttributes::new(0, 9, vec![TextEffect::Styles(vec![Style::Underline])]),
-            TextAttributes::new(9, 17, vec![TextEffect::Default]),
-            TextAttributes::new(17, 23, vec![TextEffect::Animated(Animation::Jitter)]),
-            TextAttributes::new(23, 30, vec![TextEffect::Default]),
+        message.components = vec![BubbleComponent::Run(vec![
+            AttributedRange::text(0, 9, vec![TextEffect::Styles(vec![Style::Underline])]),
+            AttributedRange::text(9, 17, vec![TextEffect::Default]),
+            AttributedRange::text(17, 23, vec![TextEffect::Animated(Animation::Jitter)]),
+            AttributedRange::text(23, 30, vec![TextEffect::Default]),
         ])];
 
         let mut actual = String::new();
@@ -2892,7 +3221,6 @@ mod text_effect_tests {
 
     #[test]
     fn can_format_txt_text_styled_plain_link() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2905,7 +3233,7 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        message.components = vec![BubbleComponent::Text(vec![TextAttributes::new(
+        message.components = vec![BubbleComponent::Run(vec![AttributedRange::text(
             0,
             61,
             vec![
@@ -2927,7 +3255,6 @@ mod text_effect_tests {
 
     #[test]
     fn can_format_txt_text_styled_emoji_bold_underline() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2939,11 +3266,11 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        message.components = vec![BubbleComponent::Text(vec![
-            TextAttributes::new(0, 7, vec![TextEffect::Default]),
-            TextAttributes::new(7, 11, vec![TextEffect::Styles(vec![Style::Bold])]),
-            TextAttributes::new(11, 12, vec![TextEffect::Default]),
-            TextAttributes::new(12, 21, vec![TextEffect::Styles(vec![Style::Underline])]),
+        message.components = vec![BubbleComponent::Run(vec![
+            AttributedRange::text(0, 7, vec![TextEffect::Default]),
+            AttributedRange::text(7, 11, vec![TextEffect::Styles(vec![Style::Bold])]),
+            AttributedRange::text(11, 12, vec![TextEffect::Default]),
+            AttributedRange::text(12, 21, vec![TextEffect::Styles(vec![Style::Underline])]),
         ])];
 
         let mut actual = String::new();
@@ -2957,7 +3284,6 @@ mod text_effect_tests {
 
     #[test]
     fn can_format_txt_text_styled_overlapping_ranges() {
-        // Create exporter
         let options = Options::fake_options(ExportType::Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -2969,8 +3295,8 @@ mod text_effect_tests {
         message.is_from_me = true;
         message.chat_id = Some(0);
 
-        message.components = vec![BubbleComponent::Text(vec![
-            TextAttributes::new(
+        message.components = vec![BubbleComponent::Run(vec![
+            AttributedRange::text(
                 0,
                 1,
                 vec![
@@ -2978,8 +3304,8 @@ mod text_effect_tests {
                     TextEffect::Styles(vec![Style::Bold]),
                 ],
             ),
-            TextAttributes::new(1, 2, vec![TextEffect::Conversion(Unit::Timezone)]),
-            TextAttributes::new(
+            AttributedRange::text(1, 2, vec![TextEffect::Conversion(Unit::Timezone)]),
+            AttributedRange::text(
                 2,
                 4,
                 vec![
@@ -2987,8 +3313,8 @@ mod text_effect_tests {
                     TextEffect::Styles(vec![Style::Underline]),
                 ],
             ),
-            TextAttributes::new(4, 5, vec![TextEffect::Conversion(Unit::Timezone)]),
-            TextAttributes::new(
+            AttributedRange::text(4, 5, vec![TextEffect::Conversion(Unit::Timezone)]),
+            AttributedRange::text(
                 5,
                 7,
                 vec![
@@ -3006,6 +3332,57 @@ mod text_effect_tests {
 
         assert_eq!(actual, expected);
     }
+
+    #[test]
+    fn can_format_txt_detected_effects_are_unformatted() {
+        let options = Options::fake_options(ExportType::Txt);
+        let config = Config::fake_app(options);
+        let exporter = TXT::new(&config).unwrap();
+
+        let mut message = Config::fake_message();
+        // May 17, 2022  8:29:42 PM
+        message.date = 674526582885055488;
+        message.text = Some("$16 1Z999AA10123456784 AS 1111".to_string());
+        message.is_from_me = true;
+        message.chat_id = Some(0);
+
+        message.components = vec![BubbleComponent::Run(vec![
+            AttributedRange::text(
+                0,
+                3,
+                vec![TextEffect::Currency(DetectedCurrency {
+                    symbol: "$".to_string(),
+                    amount: "16".to_string(),
+                })],
+            ),
+            AttributedRange::text(3, 4, vec![TextEffect::Default]),
+            AttributedRange::text(
+                4,
+                22,
+                vec![TextEffect::Tracking(ShipmentTracking {
+                    carrier: Some("UPS".to_string()),
+                    number: "1Z999AA10123456784".to_string(),
+                })],
+            ),
+            AttributedRange::text(22, 23, vec![TextEffect::Default]),
+            AttributedRange::text(
+                23,
+                30,
+                vec![TextEffect::Flight(Flight {
+                    airline: Some("AS".to_string()),
+                    number: "1111".to_string(),
+                })],
+            ),
+        ])];
+
+        let mut actual = String::new();
+        exporter
+            .format_message_into(&message, RenderContext::TopLevel, &mut actual)
+            .unwrap();
+        let expected = "May 17, 2022  5:29:42 PM\nMe\n$16 1Z999AA10123456784 AS 1111\n\n";
+
+        assert_eq!(actual, expected);
+    }
 }
 
 #[cfg(test)]
@@ -3013,9 +3390,9 @@ mod edited_tests {
     use imessage_database::{
         message_types::{
             edited::{EditStatus, EditedMessage, EditedMessagePart},
-            text_effects::TextEffect,
+            text_effects::text_effect::TextEffect,
         },
-        tables::messages::models::{AttachmentMeta, BubbleComponent, TextAttributes},
+        tables::messages::models::{AttachmentMeta, AttributedRange, BubbleComponent},
     };
 
     use crate::{
@@ -3026,7 +3403,6 @@ mod edited_tests {
 
     #[test]
     fn can_format_txt_conversion_final_unsent() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -3062,15 +3438,27 @@ mod edited_tests {
         });
 
         message.components = vec![
-            BubbleComponent::Text(vec![TextAttributes::new(0, 28, vec![TextEffect::Default])]),
-            BubbleComponent::Attachment(AttachmentMeta {
-                guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
-                transcription: None,
-                height: None,
-                width: None,
-                name: None,
-            }),
-            BubbleComponent::Text(vec![TextAttributes::new(31, 63, vec![TextEffect::Default])]),
+            BubbleComponent::Run(vec![AttributedRange::text(
+                0,
+                28,
+                vec![TextEffect::Default],
+            )]),
+            BubbleComponent::Run(vec![AttributedRange::attachment(
+                28,
+                31,
+                AttachmentMeta {
+                    guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None,
+                },
+            )]),
+            BubbleComponent::Run(vec![AttributedRange::text(
+                31,
+                63,
+                vec![TextEffect::Default],
+            )]),
             BubbleComponent::Retracted,
         ];
 
@@ -3121,7 +3509,6 @@ mod edited_tests {
 
     #[test]
     fn can_format_txt_conversion_no_edits() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();
@@ -3136,15 +3523,27 @@ mod edited_tests {
         message.chat_id = Some(0);
 
         message.components = vec![
-            BubbleComponent::Text(vec![TextAttributes::new(0, 28, vec![TextEffect::Default])]),
-            BubbleComponent::Attachment(AttachmentMeta {
-                guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
-                transcription: None,
-                height: None,
-                width: None,
-                name: None,
-            }),
-            BubbleComponent::Text(vec![TextAttributes::new(31, 63, vec![TextEffect::Default])]),
+            BubbleComponent::Run(vec![AttributedRange::text(
+                0,
+                28,
+                vec![TextEffect::Default],
+            )]),
+            BubbleComponent::Run(vec![AttributedRange::attachment(
+                28,
+                31,
+                AttachmentMeta {
+                    guid: Some("D0551D89-4E11-43D0-9A0E-06F19704E97B".to_string()),
+                    transcription: None,
+                    height: None,
+                    width: None,
+                    name: None,
+                },
+            )]),
+            BubbleComponent::Run(vec![AttributedRange::text(
+                31,
+                63,
+                vec![TextEffect::Default],
+            )]),
             BubbleComponent::Retracted,
         ];
 
@@ -3159,7 +3558,6 @@ mod edited_tests {
 
     #[test]
     fn can_format_txt_conversion_fully_unsent() {
-        // Create exporter
         let options = Options::fake_options(Txt);
         let config = Config::fake_app(options);
         let exporter = TXT::new(&config).unwrap();

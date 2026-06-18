@@ -1,29 +1,35 @@
 /*!
- This module contains Data structures and models that represent message data.
+ Message body models reconstructed from [`message.attributed_body`](crate::tables::messages::message::Message::attributed_body).
 */
 
 use std::fmt::{Display, Formatter, Result};
 
-use crabstep::{PropertyIterator, deserializer::iter::Property};
+use crabstep::deserializer::iter::Property;
 
 use crate::{
-    message_types::text_effects::TextEffect,
-    tables::messages::message::Message,
-    util::typedstream::{as_float, as_nsstring},
+    message_types::text_effects::text_effect::TextEffect, tables::messages::message::Message,
 };
 
 // MARK: BubbleComponent
-/// Defines the parts of a message bubble, i.e. the content that can exist in a single message.
+/// Component emitted for one logical message part.
 ///
 /// # Component Types
 ///
 /// A single iMessage contains data that may be represented across multiple bubbles.
+/// Each bubble corresponds to one `__kIMMessagePartAttributeName` index in the
+/// underlying [`NSAttributedString`](crate::util::typedstream); the
+/// [`Run`](Self::Run) groups every attributed range that shares that part index.
 #[derive(Debug, PartialEq, Clone)]
 pub enum BubbleComponent {
-    /// A text message with associated formatting, generally representing ranges present in a `NSAttributedString`
-    Text(Vec<TextAttributes>),
-    /// An attachment
-    Attachment(AttachmentMeta),
+    /// One bubble's worth of attributed body content. Each contained
+    /// [`AttributedRange`] models a single `NSAttributedString` attribute run
+    /// (a byte range plus its attribute dictionary); adjacent ranges that
+    /// share a `__kIMMessagePartAttributeName` index share the bubble.
+    ///
+    /// A run may interleave text ranges ([`AttributedRange::attachment`] is
+    /// `None`) with inline-attachment ranges (e.g. stickers rendered inline
+    /// like emoji), preserving their original order.
+    Run(Vec<AttributedRange>),
     /// An [app integration](crate::message_types::app)
     App,
     /// A component that was retracted, found by parsing the [`EditedMessage`](crate::message_types::edited::EditedMessage)
@@ -34,23 +40,23 @@ pub enum BubbleComponent {
 /// Defines different types of [services](https://support.apple.com/en-us/104972) we can receive messages from.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Service<'a> {
-    /// An iMessage
+    /// iMessage.
     #[allow(non_camel_case_types)]
     iMessage,
-    /// A message sent as SMS
+    /// SMS.
     SMS,
-    /// A message sent as RCS
+    /// RCS.
     RCS,
-    /// A message sent via [satellite](https://support.apple.com/en-us/120930)
+    /// A message sent via [satellite](https://support.apple.com/en-us/120930) (literally: `iMessageLite` in the database).
     Satellite,
-    /// Any other type of message
+    /// Unrecognized service name.
     Other(&'a str),
-    /// Used when service field is not set
+    /// Missing service field.
     Unknown,
 }
 
 impl<'a> Service<'a> {
-    /// Creates a [`Service`] enum variant based on the provided service name string.
+    /// Map the database service name to a [`Service`] variant.
     #[must_use]
     pub fn from_name(service: Option<&'a str>) -> Self {
         if let Some(service_name) = service {
@@ -79,98 +85,132 @@ impl Display for Service<'_> {
     }
 }
 
-// MARK: TextAttributes
-/// Defines ranges of text and associated attributes parsed from [`typedstream`](crate::util::typedstream) `attributedBody` data.
+// MARK: AttributedRange
+/// One attribute run of a message's [`NSAttributedString`](crate::util::typedstream)
+/// body: a byte range into the [`Message`]'s [`text`](crate::tables::messages::Message::text)
+/// plus every attribute applied to it.
 ///
-/// Ranges specify locations where attributes are applied to specific portions of a [`Message`]'s [`text`](crate::tables::messages::Message::text). For example, given message text with a [`Mention`](TextEffect::Mention) like:
+/// A range is a *text* range when [`attachment`](Self::attachment) is `None` and
+/// an *attachment* range (a `\u{FFFC}` placeholder for an inline attachment)
+/// when it is `Some`. Effects, styles, and the inline-emoji hint apply to either
+/// kind. The [`typedstream`](crate::util::typedstream) attribute dictionary is a flat bag, so an attachment
+/// range can also carry, say, an [`Animated`](TextEffect::Animated) effect.
+///
+/// Ranges that share a `__kIMMessagePartAttributeName` index are grouped into one
+/// [`BubbleComponent::Run`]. For example, message text with a
+/// [`Mention`](TextEffect::Mention) like:
 ///
 /// ```
 /// let message_text = "What's up, Christopher?";
 /// ```
 ///
-/// There will be 3 ranges:
+/// parses into a single run of 3 ranges:
 ///
 /// ```
-/// use imessage_database::message_types::text_effects::TextEffect;
-/// use imessage_database::tables::messages::models::{TextAttributes, BubbleComponent};
-///  
-/// let result = vec![BubbleComponent::Text(vec![
-///     TextAttributes::new(0, 11, vec![TextEffect::Default]),  // `What's up, `
-///     TextAttributes::new(11, 22, vec![TextEffect::Mention("+5558675309".to_string())]), // `Christopher`
-///     TextAttributes::new(22, 23, vec![TextEffect::Default])  // `?`
+/// use imessage_database::message_types::text_effects::text_effect::TextEffect;
+/// use imessage_database::tables::messages::models::{AttributedRange, BubbleComponent};
+///
+/// let result = vec![BubbleComponent::Run(vec![
+///     AttributedRange::text(0, 11, vec![TextEffect::Default]),  // `What's up, `
+///     AttributedRange::text(11, 22, vec![TextEffect::Mention("+5558675309".to_string())]), // `Christopher`
+///     AttributedRange::text(22, 23, vec![TextEffect::Default])  // `?`
 /// ])];
 /// ```
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct TextAttributes {
-    /// The start index of the affected range of message text
+#[derive(Debug, PartialEq, Clone)]
+pub struct AttributedRange {
+    /// Start byte index in the message text.
     pub start: usize,
-    /// The end index of the affected range of message text
+    /// End byte index in the message text.
     pub end: usize,
-    /// The effects applied to the specified range
+    /// Effects applied to this range.
     pub effects: Vec<TextEffect>,
+    /// `Some` when this range is a `\u{FFFC}` placeholder for an attachment.
+    /// The attachment's metadata travels here; effects still apply alongside.
+    pub attachment: Option<AttachmentMeta>,
+    /// `true` when the range carries `__kIMEmojiImageAttributeName`–Apple's
+    /// hint to render the attachment inline–like an emoji (observed on
+    /// genmoji, Memoji, and custom sticker ranges).
+    pub emoji_image: bool,
 }
 
-impl TextAttributes {
-    /// Creates a new [`TextAttributes`] with the specified start index, end index, and text effects.
+impl AttributedRange {
+    /// Build a text range (no attachment, no inline-emoji hint) with the
+    /// specified start index, end index, and text effects.
     #[must_use]
-    pub fn new(start: usize, end: usize, effects: Vec<TextEffect>) -> Self {
+    pub fn text(start: usize, end: usize, effects: Vec<TextEffect>) -> Self {
         Self {
             start,
             end,
             effects,
+            attachment: None,
+            emoji_image: false,
         }
+    }
+
+    /// Build an attachment range carrying the given [`AttachmentMeta`], with
+    /// no inline-emoji hint.
+    #[must_use]
+    pub fn attachment(start: usize, end: usize, meta: AttachmentMeta) -> Self {
+        Self {
+            start,
+            end,
+            effects: vec![],
+            attachment: Some(meta),
+            emoji_image: false,
+        }
+    }
+
+    /// Build an inline-rendered attachment range, one Apple flagged with
+    /// `__kIMEmojiImageAttributeName` to render inline like an emoji (a Memoji,
+    /// genmoji, or custom sticker placed amongst text).
+    #[must_use]
+    pub fn inline_attachment(start: usize, end: usize, meta: AttachmentMeta) -> Self {
+        Self {
+            start,
+            end,
+            effects: vec![],
+            attachment: Some(meta),
+            emoji_image: true,
+        }
+    }
+
+    /// `true` when this range stands in for an attachment rather than text.
+    #[must_use]
+    pub fn is_attachment(&self) -> bool {
+        self.attachment.is_some()
     }
 }
 
 // MARK: AttachmentMeta
-/// Representation of attachment metadata used for rendering message body in a conversation feed.
+/// Attachment metadata attached to a body range.
 #[derive(Debug, PartialEq, Default, Clone)]
 pub struct AttachmentMeta {
-    /// GUID of the attachment in the `attachment` table
+    /// GUID of the attachment row.
     pub guid: Option<String>,
-    /// The transcription, if the attachment was an [audio message](https://support.apple.com/guide/iphone/send-and-receive-audio-messages-iph2e42d3117/ios) sent from or received on a [supported platform](https://www.apple.com/ios/feature-availability/#messages-audio-message-transcription).
+    /// Audio transcription stored on the attributed range.
     pub transcription: Option<String>,
-    /// The height of the attachment in points
+    /// Inline media height in points.
     pub height: Option<f64>,
-    /// The width of the attachment in points
+    /// Inline media width in points.
     pub width: Option<f64>,
-    /// The attachment's original filename
+    /// Original attachment filename.
     pub name: Option<String>,
 }
 
 impl AttachmentMeta {
-    /// Populates the attachment metadata fields from a typedstream property iterator.
-    #[must_use]
-    pub(crate) fn from_components<'a>(
-        first_key: &str,
-        components: &'a mut PropertyIterator<'a, 'a>,
-    ) -> Self {
-        let mut meta = Self::default();
-
-        if let Some(mut prop) = components.next() {
-            meta.set_from_key_value(first_key, &mut prop);
-        }
-
-        while let Some(mut key) = components.next() {
-            if let Some(key_name) = as_nsstring(&mut key)
-                && let Some(mut value) = components.next()
-            {
-                meta.set_from_key_value(key_name, &mut value);
-            }
-        }
-
-        meta
-    }
-
-    fn set_from_key_value<'a>(&'a mut self, key: &'a str, value: &'a mut Property<'a, 'a>) {
+    /// Applies a single typedstream attribute key/value pair to the metadata,
+    /// ignoring any key that isn't attachment metadata. Driven per-key by the
+    /// body parser's `build_range`, which walks the full attribute dictionary
+    /// so non-attachment-meta keys on the same range are still processed.
+    pub(crate) fn set_from_key_value<'a>(&mut self, key: &str, value: &Property<'a, 'a>) {
         match key {
             "__kIMFileTransferGUIDAttributeName" => {
-                self.guid = as_nsstring(value).map(String::from);
+                self.guid = value.as_string().map(String::from);
             }
-            "IMAudioTranscription" => self.transcription = as_nsstring(value).map(String::from),
-            "__kIMInlineMediaHeightAttributeName" => self.height = as_float(value),
-            "__kIMInlineMediaWidthAttributeName" => self.width = as_float(value),
-            "__kIMFilenameAttributeName" => self.name = as_nsstring(value).map(String::from),
+            "IMAudioTranscription" => self.transcription = value.as_string().map(String::from),
+            "__kIMInlineMediaHeightAttributeName" => self.height = value.as_f64(),
+            "__kIMInlineMediaWidthAttributeName" => self.width = value.as_f64(),
+            "__kIMFilenameAttributeName" => self.name = value.as_string().map(String::from),
             _ => {}
         }
     }
@@ -189,31 +229,31 @@ pub enum SharedLocation {
 }
 
 // MARK: GroupAction
-/// Represents different types of group message actions that can occur in a chat system
+/// Group action encoded by a message row.
 #[derive(Debug, PartialEq, Eq)]
 pub enum GroupAction<'a> {
-    /// A new participant has been added to the group
+    /// Participant was added to the group.
     ParticipantAdded(i32),
-    /// A participant has been removed from the group
+    /// Participant was removed from the group.
     ParticipantRemoved(i32),
-    /// The group name has been changed
+    /// Group name changed.
     NameChange(&'a str),
-    /// A participant has voluntarily left the group
+    /// Participant left the group.
     ParticipantLeft,
-    /// The group icon/avatar has been updated with a new image
+    /// Group icon/avatar changed.
     GroupIconChanged,
-    /// The group icon/avatar has been removed, reverting to default
+    /// Group icon/avatar was removed.
     GroupIconRemoved,
-    /// The chat background was changed
+    /// Chat background changed.
     ChatBackgroundChanged,
-    /// The chat background was removed
+    /// Chat background was removed.
     ChatBackgroundRemoved,
-    /// A participant changed their phone number
+    /// Participant changed their phone number.
     PhoneNumberChanged(i32),
 }
 
 impl<'a> GroupAction<'a> {
-    /// Creates a new `GroupAction` event type based on the provided message's item and group action data.
+    /// Parse group action fields from a message row.
     #[must_use]
     pub(crate) fn from_message(message: &'a Message) -> Option<Self> {
         match (

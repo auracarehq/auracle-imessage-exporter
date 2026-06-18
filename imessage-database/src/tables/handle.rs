@@ -1,5 +1,5 @@
 /*!
- This module represents common (but not all) columns in the `handle` table.
+ Handle table rows and handle deduplication helpers.
 */
 
 use rusqlite::{CachedStatement, Connection, Result, Row};
@@ -8,20 +8,20 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::{
     error::table::TableError,
     tables::{
-        diagnostic::HandleDiagnostic,
+        diagnostic::{HandleDiagnostic, column_exists, count_query},
         table::{Cacheable, HANDLE, ME, Table},
     },
 };
 
 // MARK: Handle
-/// Represents a single row in the `handle` table.
+/// Row from the `handle` table.
 #[derive(Debug)]
 pub struct Handle {
-    /// The unique identifier for the handle in the database
+    /// Handle row ID.
     pub rowid: i32,
-    /// Identifier for a contact, i.e. a phone number or email address
+    /// Phone number, email address, or service identifier.
     pub id: String,
-    /// Field used to disambiguate divergent handles that represent the same contact
+    /// Contact identity used by Messages to group related handles.
     pub person_centric_id: Option<String>,
 }
 
@@ -44,8 +44,9 @@ impl Table for Handle {
 impl Cacheable for Handle {
     type K = i32;
     type V = String;
-    /// Generate a `HashMap` for looking up contacts by their IDs, collapsing
-    /// duplicate contacts to the same ID String regardless of service
+    /// Cache handle display strings by row ID.
+    ///
+    /// Handles that share `person_centric_id` map to the same combined string.
     ///
     /// # Example:
     ///
@@ -59,9 +60,8 @@ impl Cacheable for Handle {
     /// let chatrooms = Handle::cache(&conn);
     /// ```
     fn cache(db: &Connection) -> Result<HashMap<Self::K, Self::V>, TableError> {
-        // Create cache for user IDs
         let mut map = HashMap::new();
-        // Handle ID 0 is self in group chats
+        // Handle ID 0 is self in group chats.
         map.insert(0, ME.to_string());
 
         // Create query
@@ -80,17 +80,15 @@ impl Cacheable for Handle {
             map.insert(id, new);
         }
 
-        // Done!
         Ok(map)
     }
 }
 
 // MARK: Dedupe
 impl Handle {
-    /// Given the initial set of duplicated handles, deduplicate them
+    /// Assign stable deduplicated IDs to handle display strings.
     ///
-    /// This returns a new hashmap that maps the real handle ID to a new deduplicated unique handle ID
-    /// that represents a single handle for all of the deduplicate handles.
+    /// Returns a map from real handle row ID to a sequential participant ID.
     ///
     /// Assuming no new handles have been written to the database, deduplicated data is deterministic across runs.
     ///
@@ -113,7 +111,7 @@ impl Handle {
         // Build cache of each unique set of participants to a new identifier:
         let mut unique_participant_identifier = 0;
 
-        // Iterate over the values in a deterministic order
+        // Deterministic iteration keeps deduplicated IDs stable across runs.
         let mut sorted_dupes: Vec<(&i32, &String)> = duplicated_data.iter().collect();
         sorted_dupes.sort_by_key(|(a, _)| *a);
 
@@ -133,7 +131,7 @@ impl Handle {
 
 // MARK: Diagnostic
 impl Handle {
-    /// Compute diagnostic data for the Handles table
+    /// Compute diagnostic data for the `handle` table.
     ///
     /// Counts the number of handles that are duplicated. The `person_centric_id`
     /// is used to map handles that represent the same contact across ids (numbers,
@@ -159,13 +157,10 @@ impl Handle {
             "WHERE person_centric_id NOT NULL"
         );
 
-        let handles_with_multiple_ids = if let Ok(mut rows) = db.prepare(query) {
-            rows.query_row([], |r| r.get::<_, i64>(0))
-                .ok()
-                .and_then(|count| usize::try_from(count).ok())
-                .unwrap_or(0)
+        let handles_with_multiple_ids = if column_exists(db, HANDLE, "person_centric_id")? {
+            Some(count_query(db, query)?)
         } else {
-            0
+            None
         };
 
         // Cache all handles
@@ -188,11 +183,7 @@ impl Handle {
 
 // MARK: Impl
 impl Handle {
-    /// The handles table does not have a lot of information and can have many duplicate values.
-    ///
-    /// This method generates a hashmap of each separate item in this table to a combined string
-    /// that represents all of the copies, so any handle ID will always map to the same string
-    /// for a given chat participant
+    /// Map handles sharing `person_centric_id` to a combined display string.
     fn get_person_id_map(db: &Connection) -> Result<HashMap<i32, String>, TableError> {
         let mut person_to_id: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut row_to_id: HashMap<i32, String> = HashMap::new();
@@ -221,7 +212,7 @@ impl Handle {
                 row_data.push(contact?);
             }
 
-            // First pass: generate a map of each person_centric_id to its matching ids
+            // First pass: group handle strings by `person_centric_id`.
             for contact in &row_data {
                 let (person_centric_id, _, id) = contact;
                 if let Some(set) = person_to_id.get_mut(person_centric_id) {
@@ -233,7 +224,7 @@ impl Handle {
                 }
             }
 
-            // Second pass: point each ROWID to the matching ids
+            // Second pass: map each row ID to its combined display string.
             for contact in &row_data {
                 let (person_centric_id, rowid, _) = contact;
                 let data_to_insert = match person_to_id.get_mut(person_centric_id) {
@@ -252,6 +243,7 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use crate::tables::handle::Handle;
+    use rusqlite::Connection;
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -313,5 +305,51 @@ mod tests {
         assert_eq!(output_1, output_2);
         assert_eq!(output_1, output_3);
         assert_eq!(output_2, output_3);
+    }
+
+    #[test]
+    fn diagnostic_omits_person_centric_count_when_column_is_missing() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute(
+            "CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO handle (ROWID, id) VALUES (1, 'first'), (2, 'second')",
+            [],
+        )
+        .unwrap();
+
+        let diagnostic = Handle::run_diagnostic(&db).unwrap();
+
+        assert_eq!(diagnostic.total_handles, 3);
+        assert_eq!(diagnostic.handles_with_multiple_ids, None);
+    }
+
+    #[test]
+    fn diagnostic_counts_person_centric_ids_when_column_exists() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute(
+            "CREATE TABLE handle (
+                ROWID INTEGER PRIMARY KEY,
+                id TEXT NOT NULL,
+                person_centric_id TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO handle (ROWID, id, person_centric_id)
+             VALUES (1, 'first', 'person-1'),
+                    (2, 'second', 'person-1'),
+                    (3, 'third', 'person-2')",
+            [],
+        )
+        .unwrap();
+
+        let diagnostic = Handle::run_diagnostic(&db).unwrap();
+
+        assert_eq!(diagnostic.handles_with_multiple_ids, Some(2));
     }
 }
