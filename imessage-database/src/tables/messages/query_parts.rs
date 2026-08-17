@@ -5,14 +5,16 @@
  - If the database has `thread_originator_guid`, we can count replies.
  - If the database has `filter_action`, we can read message filter categories.
 
- Explicit heads select the same columns in positional decode order. `SELECT *`
- heads use named decoding because their source-column order varies by schema.
+ [`Message::rows`](super::Message::rows) maps each head's column names to
+ ordinals before decoding. A head may therefore select columns in any order and
+ omit columns that [`Message`](super::Message) reads with a default. See
+ `MessageColumns` in [`message`](super::message).
 */
 
 use std::sync::LazyLock;
 
 use crate::tables::{
-    messages::message::COLS,
+    messages::columns::COMMON_COLS,
     table::{CHAT_MESSAGE_JOIN, MESSAGE, MESSAGE_ATTACHMENT_JOIN, RECENTLY_DELETED},
 };
 
@@ -21,7 +23,7 @@ use crate::tables::{
 static IOS_27_NEWER_HEAD: LazyLock<String> = LazyLock::new(|| {
     format!("
 SELECT
-    {COLS},
+    {COMMON_COLS},
     c.chat_id,
     (SELECT COUNT(*) FROM {MESSAGE_ATTACHMENT_JOIN} a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -40,7 +42,7 @@ LEFT JOIN {RECENTLY_DELETED} as d ON m.ROWID = d.message_id
 static IOS_16_NEWER_HEAD: LazyLock<String> = LazyLock::new(|| {
     format!("
 SELECT
-    {COLS},
+    {COMMON_COLS},
     c.chat_id,
     (SELECT COUNT(*) FROM {MESSAGE_ATTACHMENT_JOIN} a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -56,13 +58,13 @@ LEFT JOIN {RECENTLY_DELETED} as d ON m.ROWID = d.message_id
 
 /// Query head that reads reply data without joining recoverable messages.
 ///
-/// `SELECT *` preserves the source schema. Named decoding maps missing filter
-/// columns to `None` without introducing aliases that could duplicate real
-/// columns.
+/// `m.*` preserves filter columns when present. When absent, resolution
+/// leaves their ordinals unset and deserialization yields `None`. Adding `NULL`
+/// aliases would create duplicate names when the columns exist.
 static IOS_14_15_HEAD: LazyLock<String> = LazyLock::new(|| {
     format!("
 SELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM {MESSAGE_ATTACHMENT_JOIN} a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
@@ -77,7 +79,7 @@ LEFT JOIN {CHAT_MESSAGE_JOIN} as c ON m.ROWID = c.message_id
 static IOS_13_OLDER_HEAD: LazyLock<String> = LazyLock::new(|| {
     format!("
 SELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM {MESSAGE_ATTACHMENT_JOIN} a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
