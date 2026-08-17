@@ -25,7 +25,11 @@ use crate::{
         },
     },
     util::{
-        dirs::home, platform::Platform, plist::plist_as_dictionary, query_context::QueryContext,
+        bundle_id::parse_balloon_bundle_id,
+        dirs::home,
+        platform::Platform,
+        plist::{get_owned_string_from_dict, get_value_from_dict, plist_as_dictionary},
+        query_context::QueryContext,
         size::format_file_size,
     },
 };
@@ -88,6 +92,46 @@ impl MediaType<'_> {
             MediaType::Other(mime) => (*mime).to_string(),
             MediaType::Unknown => String::new(),
         }
+    }
+}
+
+// MARK: AttachmentAttribution
+/// Attribution metadata parsed from the [`ATTRIBUTION_INFO`] column.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AttachmentAttribution {
+    /// Bundle ID stored under `bundle-id`.
+    pub bundle_id: String,
+    /// Display name stored under `name`.
+    pub name: Option<String>,
+    /// App Store ID stored under `adam-id`.
+    pub adam_id: Option<i64>,
+}
+
+impl AttachmentAttribution {
+    /// Parse an attribution from a deserialized [`ATTRIBUTION_INFO`] property list.
+    ///
+    /// Returns `None` unless the root is a dictionary containing a non-empty
+    /// string under `bundle-id`.
+    #[must_use]
+    pub fn from_plist(payload: &Value) -> Option<Self> {
+        Some(Self {
+            bundle_id: get_owned_string_from_dict(payload, "bundle-id")?,
+            name: get_owned_string_from_dict(payload, "name"),
+            adam_id: get_value_from_dict(payload, "adam-id").and_then(Value::as_signed_integer),
+        })
+    }
+
+    /// Return the stored bundle ID when it contains no `:` separators;
+    /// otherwise, return its third `:`-delimited component.
+    #[must_use]
+    pub fn app_bundle_id(&self) -> Option<&str> {
+        parse_balloon_bundle_id(Some(&self.bundle_id))
+    }
+
+    /// Whether the app bundle ID identifies the Messages drawing board.
+    #[must_use]
+    pub fn is_drawing(&self) -> bool {
+        self.app_bundle_id() == Some("com.apple.PaperKit.MessagesDrawingBoard")
     }
 }
 
@@ -530,8 +574,6 @@ impl Attachment {
     /// Parse the [`ATTRIBUTION_INFO`] `BLOB` column as a property list.
     ///
     /// Calling this reads a `BLOB` from the database.
-    ///
-    /// This column contains metadata used by image attachments.
     fn attribution_info(&self, db: &Connection) -> Option<Value> {
         Value::from_reader(self.get_blob(db, ATTACHMENT, ATTRIBUTION_INFO, self.rowid.into())?).ok()
     }
@@ -548,15 +590,21 @@ impl Attachment {
         None
     }
 
-    /// Parse a sticker's source application name from [`ATTRIBUTION_INFO`].
+    /// Parse this attachment's attribution from [`ATTRIBUTION_INFO`].
+    ///
+    /// Calling this reads a `BLOB` from the database.
+    pub fn get_attribution(&self, db: &Connection) -> Option<AttachmentAttribution> {
+        AttachmentAttribution::from_plist(&self.attribution_info(db)?)
+    }
+
+    /// Return a sticker's attributed application name from [`ATTRIBUTION_INFO`].
+    ///
+    /// Returns `None` unless the property list contains non-empty `bundle-id`
+    /// and `name` strings.
     ///
     /// Calling this reads a `BLOB` from the database.
     pub fn get_sticker_source_application_name(&self, db: &Connection) -> Option<String> {
-        if let Some(attribution_info) = self.attribution_info(db) {
-            let plist = plist_as_dictionary(&attribution_info).ok()?;
-            return Some(plist.get("name")?.as_string()?.to_owned());
-        }
-        None
+        self.get_attribution(db)?.name
     }
 
     /// Resolve a sticker's [`StickerSource`] into a [`StickerDecoration`].
@@ -608,17 +656,20 @@ mod tests {
     use crate::{
         tables::{
             attachment::{
-                Attachment, DEFAULT_ATTACHMENT_ROOT, DEFAULT_SMS_ROOT, DEFAULT_STICKER_CACHE_ROOT,
-                MediaType,
+                Attachment, AttachmentAttribution, DEFAULT_ATTACHMENT_ROOT, DEFAULT_SMS_ROOT,
+                DEFAULT_STICKER_CACHE_ROOT, MediaType,
             },
             table::get_connection,
         },
         util::{platform::Platform, query_context::QueryContext},
     };
 
+    use plist::{Dictionary, Value};
+
     use std::{
         collections::BTreeSet,
         env::current_dir,
+        fs::File,
         path::{Path, PathBuf},
     };
 
@@ -1029,5 +1080,108 @@ mod tests {
         attachment.total_bytes = i64::MAX;
 
         assert_eq!(attachment.file_size(), String::from("8388608.00 TB"));
+    }
+
+    fn attribution_fixture(name: &str) -> Value {
+        let plist_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("imessage-database/test_data/attribution/{name}"));
+        Value::from_reader(File::open(plist_path).unwrap()).unwrap()
+    }
+
+    fn test_db() -> rusqlite::Connection {
+        let db_path = current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imessage-database/test_data/db/test.db");
+        get_connection(&db_path).unwrap()
+    }
+
+    #[test]
+    fn can_parse_drawing_attribution() {
+        let attribution = AttachmentAttribution::from_plist(&attribution_fixture("Drawing.plist"))
+            .expect("Drawing.plist names a source app");
+
+        assert_eq!(
+            attribution.bundle_id,
+            "com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.PaperKit.MessagesDrawingBoard"
+        );
+        assert_eq!(attribution.name.as_deref(), Some("Drawing"));
+        assert_eq!(attribution.adam_id, None);
+        assert_eq!(
+            attribution.app_bundle_id(),
+            Some("com.apple.PaperKit.MessagesDrawingBoard")
+        );
+        assert!(attribution.is_drawing());
+    }
+
+    #[test]
+    fn can_parse_sticker_attribution() {
+        let attribution = AttachmentAttribution::from_plist(&attribution_fixture("Sticker.plist"))
+            .expect("Sticker.plist names a source app");
+
+        assert_eq!(attribution.name.as_deref(), Some("Free People"));
+        assert_eq!(attribution.adam_id, Some(659_532_790));
+        assert_eq!(
+            attribution.app_bundle_id(),
+            Some("com.freepeople.iosapp-production.stickers")
+        );
+        assert!(!attribution.is_drawing());
+    }
+
+    #[test]
+    fn cant_parse_attribution_without_bundle_id() {
+        let mut payload = Dictionary::new();
+        payload.insert("pgensh".to_string(), Value::Integer(1024.into()));
+        payload.insert("pgensw".to_string(), Value::Integer(1024.into()));
+
+        assert_eq!(
+            AttachmentAttribution::from_plist(&Value::Dictionary(payload)),
+            None
+        );
+    }
+
+    #[test]
+    fn can_get_drawing_attribution_from_db() {
+        let db = test_db();
+        let mut attachment = sample_attachment();
+        attachment.rowid = 4;
+
+        let attribution = attachment
+            .get_attribution(&db)
+            .expect("attachment 4 is a drawing");
+
+        assert!(attribution.is_drawing());
+        assert_eq!(attribution.name.as_deref(), Some("Drawing"));
+    }
+
+    #[test]
+    fn can_get_sticker_attribution_from_db() {
+        let db = test_db();
+        let attachment = sample_attachment();
+
+        let attribution = attachment
+            .get_attribution(&db)
+            .expect("attachment 1 is an app sticker");
+
+        assert!(!attribution.is_drawing());
+        assert_eq!(attribution.adam_id, Some(659_532_790));
+        assert_eq!(
+            attachment.get_sticker_source_application_name(&db),
+            Some("Free People".to_string())
+        );
+    }
+
+    #[test]
+    fn cant_get_attribution_from_db_without_column() {
+        let db = test_db();
+        let mut attachment = sample_attachment();
+        attachment.rowid = 2;
+
+        assert_eq!(attachment.get_attribution(&db), None);
+        assert_eq!(attachment.get_sticker_source_application_name(&db), None);
     }
 }
