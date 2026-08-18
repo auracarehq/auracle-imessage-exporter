@@ -3,7 +3,7 @@
 
  - If the database has `chat_recoverable_message_join`, we can restore some deleted messages.
  - If the database has `thread_originator_guid`, we can count replies.
- - If the database has `filter_action`, we can read message filter categories.
+ - If the database has `filter_action` and `filter_sub_action`, we can read message filter categories.
 
  [`Message::rows`](super::Message::rows) maps each head's column names to
  ordinals before decoding. A head may therefore select columns in any order and
@@ -12,6 +12,8 @@
 */
 
 use std::sync::LazyLock;
+
+use rusqlite::{CachedStatement, Connection, Result};
 
 use crate::tables::{
     messages::columns::COMMON_COLS,
@@ -35,6 +37,11 @@ FROM
 LEFT JOIN {CHAT_MESSAGE_JOIN} as c ON m.ROWID = c.message_id
 LEFT JOIN {RECENTLY_DELETED} as d ON m.ROWID = d.message_id
 ")
+});
+
+/// Probe whose preparation requires both filter columns.
+static FILTER_COLUMN_PROBE: LazyLock<String> = LazyLock::new(|| {
+    format!("SELECT m.filter_action, m.filter_sub_action FROM {MESSAGE} m LIMIT 0")
 });
 
 /// Query head that reads recoverable-message and reply data and substitutes
@@ -96,6 +103,20 @@ ORDER BY
 ";
 
 // MARK: Functions
+/// Prepare [`ios_27_newer_query`] after verifying that both filter columns
+/// exist.
+///
+/// A failed probe returns [`rusqlite::Error`], so callers can fall back to an
+/// older query with `or_else`. The full query is built only after the probe
+/// succeeds.
+pub(crate) fn prepare_ios_27_newer<'db>(
+    db: &'db Connection,
+    filters: Option<&str>,
+) -> Result<CachedStatement<'db>> {
+    db.prepare_cached(&FILTER_COLUMN_PROBE)?;
+    db.prepare_cached(&ios_27_newer_query(filters))
+}
+
 /// Build a query for schemas with message filter columns.
 pub(crate) fn ios_27_newer_query(filters: Option<&str>) -> String {
     format!(
