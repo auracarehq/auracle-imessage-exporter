@@ -246,6 +246,7 @@ pub fn export_jsonl<W: Write>(options: &ExportOptions, output: W) -> Result<(), 
         &reaction_index,
         &mut emitter,
     )?;
+    report_unassociated_messages(&database, &message_columns)?;
 
     let last_message_rowid: i64 = database
         .query_row("SELECT COALESCE(MAX(ROWID), 0) FROM message", [], |row| {
@@ -298,18 +299,21 @@ fn require_tables(database: &Connection) -> Result<(), ExportError> {
         "chat_handle_join",
         "message_attachment_join",
     ] {
-        let exists: bool = database
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-                [table],
-                |row| row.get(0),
-            )
-            .map_err(|_| ExportError::DatabaseRead)?;
-        if !exists {
+        if !table_exists(database, table)? {
             return Err(ExportError::DatabaseSchema);
         }
     }
     Ok(())
+}
+
+fn table_exists(database: &Connection, table: &str) -> Result<bool, ExportError> {
+    database
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|_| ExportError::DatabaseRead)
 }
 
 fn columns(database: &Connection, table: &str) -> Result<HashSet<String>, ExportError> {
@@ -472,6 +476,18 @@ fn emit_messages<W: Write>(
     let group_action = optional_integer(message_columns, "group_action_type", "0");
     let associated_type = optional_integer(message_columns, "associated_message_type", "NULL");
     let chat_identity = chat_identity_expression(chat_columns)?;
+    let chat_join = if table_exists(database, "chat_recoverable_message_join")? {
+        "SELECT message_id, MIN(chat_id) AS chat_id FROM chat_message_join GROUP BY message_id \
+         UNION ALL \
+         SELECT r.message_id, MIN(r.chat_id) AS chat_id \
+         FROM chat_recoverable_message_join r \
+         WHERE NOT EXISTS (SELECT 1 FROM chat_message_join a \
+                           WHERE a.message_id = r.message_id) \
+         GROUP BY r.message_id"
+    } else {
+        "SELECT message_id, MIN(chat_id) AS chat_id \
+         FROM chat_message_join GROUP BY message_id"
+    };
     let sql = format!(
         "SELECT m.ROWID, m.guid, cmj.chat_id, {chat_identity} AS chat_guid, \
          {handle_id} AS handle_id, m.date, m.is_from_me, {text} AS text, \
@@ -480,8 +496,7 @@ fn emit_messages<W: Write>(
          {item_type} AS item_type, {group_action} AS group_action_type, \
          {associated_type} AS associated_message_type \
          FROM message m \
-         JOIN (SELECT message_id, MIN(chat_id) AS chat_id \
-               FROM chat_message_join GROUP BY message_id) cmj ON cmj.message_id = m.ROWID \
+         JOIN ({chat_join}) cmj ON cmj.message_id = m.ROWID \
          JOIN chat c ON c.ROWID = cmj.chat_id \
          WHERE m.guid IS NOT NULL AND m.guid != '' \
          AND m.ROWID = (SELECT MAX(m2.ROWID) FROM message m2 WHERE m2.guid = m.guid) \
@@ -499,9 +514,9 @@ fn emit_messages<W: Write>(
         let item_type: i64 = row.get(11).map_err(|_| ExportError::DatabaseRead)?;
         let group_action: i64 = row.get(12).map_err(|_| ExportError::DatabaseRead)?;
         let associated_type: Option<i64> = row.get(13).map_err(|_| ExportError::DatabaseRead)?;
-        let is_reaction = associated_type.is_some_and(|value| value != 0);
+        let is_associated_event = !is_canonical_association(associated_type);
         let is_service = item_type != 0 || group_action != 0;
-        if is_reaction || is_service {
+        if is_associated_event || is_service {
             continue;
         }
         if incremental
@@ -577,6 +592,9 @@ fn load_reactions(
             continue;
         }
         let reaction_type: i64 = row.get(4).map_err(|_| ExportError::DatabaseRead)?;
+        if !is_reaction_type(reaction_type) {
+            continue;
+        }
         let emoji: Option<String> = row.get(5).map_err(|_| ExportError::DatabaseRead)?;
         let guid: Option<String> = row.get(1).map_err(|_| ExportError::DatabaseRead)?;
         let rowid: i64 = row.get(0).map_err(|_| ExportError::DatabaseRead)?;
@@ -631,24 +649,64 @@ fn changed_reaction_targets(
     previous_message_date: i64,
     incremental: bool,
 ) -> Result<HashSet<String>, ExportError> {
-    if !incremental || !message_columns.contains("associated_message_guid") {
+    if !incremental
+        || !message_columns.contains("associated_message_guid")
+        || !message_columns.contains("associated_message_type")
+    {
         return Ok(HashSet::new());
     }
     let mut statement = database
         .prepare(
-            "SELECT associated_message_guid FROM message \
+            "SELECT associated_message_guid, associated_message_type FROM message \
              WHERE (ROWID > ?1 OR date > ?2) \
-             AND associated_message_guid IS NOT NULL ORDER BY ROWID",
+             AND associated_message_guid IS NOT NULL \
+             AND associated_message_type IS NOT NULL ORDER BY ROWID",
         )
         .map_err(|_| ExportError::DatabaseSchema)?;
     let rows = statement
         .query_map([previous_rowid, previous_message_date], |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .map_err(|_| ExportError::DatabaseRead)?;
-    rows.map(|value| value.map(|target| canonical_target(&target).to_owned()))
-        .collect::<Result<HashSet<_>, _>>()
-        .map_err(|_| ExportError::DatabaseRead)
+    let mut targets = HashSet::new();
+    for value in rows {
+        let (target, reaction_type) = value.map_err(|_| ExportError::DatabaseRead)?;
+        if is_reaction_type(reaction_type) {
+            targets.insert(canonical_target(&target).to_owned());
+        }
+    }
+    Ok(targets)
+}
+
+fn report_unassociated_messages(
+    database: &Connection,
+    message_columns: &HashSet<String>,
+) -> Result<(), ExportError> {
+    let item_type = optional_integer(message_columns, "item_type", "0");
+    let group_action = optional_integer(message_columns, "group_action_type", "0");
+    let associated_type = optional_integer(message_columns, "associated_message_type", "NULL");
+    let recoverable = if table_exists(database, "chat_recoverable_message_join")? {
+        "AND NOT EXISTS (SELECT 1 FROM chat_recoverable_message_join r \
+                         WHERE r.message_id = m.ROWID)"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT COUNT(*) FROM message m \
+         WHERE m.guid IS NOT NULL AND m.guid != '' \
+         AND COALESCE({item_type}, 0) = 0 \
+         AND COALESCE({group_action}, 0) = 0 \
+         AND COALESCE({associated_type}, 0) IN (0, 2, 3) \
+         AND NOT EXISTS (SELECT 1 FROM chat_message_join a \
+                         WHERE a.message_id = m.ROWID) {recoverable}"
+    );
+    let count: i64 = database
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(|_| ExportError::DatabaseRead)?;
+    if count > 0 {
+        eprintln!("diagnostic=unassociated_canonical_messages count={count}");
+    }
+    Ok(())
 }
 
 fn emit_attachments<W: Write>(
@@ -777,6 +835,14 @@ fn reaction_kind(value: i64) -> &'static str {
         6 => "custom",
         _ => "unknown",
     }
+}
+
+fn is_canonical_association(value: Option<i64>) -> bool {
+    matches!(value, None | Some(0 | 2 | 3))
+}
+
+fn is_reaction_type(value: i64) -> bool {
+    value == 1000 || (2000..=2007).contains(&value) || (3000..=3007).contains(&value)
 }
 
 fn handle_source_id(rowid: i64) -> String {

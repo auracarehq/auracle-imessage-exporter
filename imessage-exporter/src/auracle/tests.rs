@@ -33,6 +33,7 @@ impl Fixture {
                     message_summary_info BLOB
                 );
                 CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+                CREATE TABLE chat_recoverable_message_join (chat_id INTEGER, message_id INTEGER);
                 CREATE TABLE attachment (
                     guid TEXT, filename TEXT, transfer_name TEXT, mime_type TEXT,
                     total_bytes INTEGER
@@ -71,8 +72,24 @@ impl Fixture {
                     ROWID, guid, text, service, handle_id, date, is_from_me, date_edited
                 ) VALUES
                     (105, 'GUID-EDITED', NULL, 'iMessage', 1, 6, 0, 690513494000000000);
+                INSERT INTO message(
+                    ROWID, guid, text, service, handle_id, date, is_from_me,
+                    associated_message_guid, associated_message_type
+                ) VALUES
+                    (106, 'GUID-APP-2', 'app payload two', 'iMessage', 1, 7, 0,
+                     'bp:GUID-M1', 2),
+                    (107, 'GUID-APP-3', 'app payload three', 'iMessage', 2, 8, 0,
+                     'bp:GUID-M1', 3),
+                    (108, 'GUID-POLL', 'poll vote', 'iMessage', 2, 9, 0,
+                     'bp:GUID-M1', 4000);
+                INSERT INTO message(
+                    ROWID, guid, text, service, handle_id, date, is_from_me
+                ) VALUES
+                    (109, 'GUID-RECOVERED', 'recently deleted', 'iMessage', 1, 10, 0);
                 INSERT INTO chat_message_join(chat_id, message_id) VALUES
-                    (10, 100), (11, 101), (10, 102), (11, 103), (11, 104), (10, 105);
+                    (10, 100), (11, 101), (10, 102), (11, 103), (11, 104), (10, 105),
+                    (10, 106), (11, 107), (10, 108);
+                INSERT INTO chat_recoverable_message_join(chat_id, message_id) VALUES (10, 109);
 
                 INSERT INTO attachment(
                     ROWID, guid, filename, transfer_name, mime_type, total_bytes
@@ -207,13 +224,31 @@ fn rich_fixture_covers_relationships_edits_reactions_services_bodies_and_attachm
         .iter()
         .filter(|record| record["type"] == "message")
         .collect();
-    assert_eq!(messages.len(), 4);
+    assert_eq!(messages.len(), 7);
     assert!(!messages.iter().any(|message| message["guid"] == "GUID-R1"));
     assert!(
         !messages
             .iter()
             .any(|message| message["guid"] == "GUID-SERVICE")
     );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message["guid"] == "GUID-POLL")
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["guid"] == "GUID-APP-2")
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["guid"] == "GUID-APP-3")
+    );
+    assert!(messages.iter().any(|message| {
+        message["guid"] == "GUID-RECOVERED" && message["chat_guid"] == "chat-direct"
+    }));
     assert!(messages.iter().any(|message| {
         message["guid"] == "GUID-M1"
             && message["direction"] == "incoming"
@@ -271,7 +306,7 @@ fn cursor_resume_emits_new_edits_and_reaction_updates_exactly_once() {
             "INSERT INTO message(
                 ROWID, guid, text, service, handle_id, date, is_from_me,
                 associated_message_guid, associated_message_type
-             ) VALUES (106, 'GUID-R2', NULL, 'iMessage', 1, 7, 0, 'bp:GUID-M2', 2000)",
+             ) VALUES (110, 'GUID-R2', NULL, 'iMessage', 1, 11, 0, 'bp:GUID-M2', 2000)",
             [],
         )
         .expect("new reaction");
@@ -279,13 +314,13 @@ fn cursor_resume_emits_new_edits_and_reaction_updates_exactly_once() {
         .execute(
             "INSERT INTO message(
                 ROWID, guid, text, service, handle_id, date, is_from_me
-             ) VALUES (107, 'GUID-M4', 'new canonical', 'iMessage', 1, 8, 0)",
+             ) VALUES (111, 'GUID-M4', 'new canonical', 'iMessage', 1, 12, 0)",
             [],
         )
         .expect("new message");
     database
         .execute(
-            "INSERT INTO chat_message_join(chat_id, message_id) VALUES (11, 106), (10, 107)",
+            "INSERT INTO chat_message_join(chat_id, message_id) VALUES (11, 110), (10, 111)",
             [],
         )
         .expect("message chats");
@@ -362,7 +397,7 @@ fn manifest_detects_a_changed_database_identity() {
             .iter()
             .filter(|record| record["type"] == "message")
             .count(),
-        4
+        7
     );
 }
 
