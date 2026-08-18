@@ -48,10 +48,14 @@
  - [`Message::deleted_from`]
  - [`Message::num_replies`]
 
- [`Message::filter_action`] and [`Message::filter_sub_action`] map optional
- `message` columns. Queries that use the explicit positional shape must select
- `NULL` for both fields when the source schema omits them. The `SELECT *` query
- heads decode by name and map missing columns to `None`.
+ [`Message::rows`] and [`Message::row`] resolve result columns by name once,
+ then decode by ordinal. Column order is immaterial; column names are not. Six
+ columns are mandatory: `rowid`, `guid`, `date`, `is_from_me`,
+ `num_attachments`, and `num_replies`. A query that omits any of them fails to
+ deserialize. Every other column [`Message`] reads may be omitted and takes its
+ default. Thus,
+ [`Message::filter_action`] and [`Message::filter_sub_action`] read as `None`
+ against schemas without those columns.
 
  ## Sample Queries
 
@@ -137,7 +141,7 @@ use std::{
 use chrono::{DateTime, offset::Local};
 use crabstep::TypedStreamDeserializer;
 use plist::Value;
-use rusqlite::{CachedStatement, Connection, Result, Row};
+use rusqlite::{CachedStatement, Connection, Params, Result, Row, Statement};
 
 use crate::{
     error::{message::MessageError, table::TableError},
@@ -153,6 +157,7 @@ use crate::{
         diagnostic::{MessageDiagnostic, count_query, table_exists},
         messages::{
             body::{parse_body_legacy, parse_body_typedstream},
+            columns::{COMMON_COLS, MessageColumns},
             models::{BubbleComponent, FilterAction, GroupAction, Service, SharedLocation},
             query_parts::{
                 ios_13_older_query, ios_14_15_query, ios_16_newer_query, ios_27_newer_query,
@@ -160,7 +165,7 @@ use crate::{
         },
         table::{
             ATTRIBUTED_BODY, CHAT_MESSAGE_JOIN, Cacheable, MESSAGE, MESSAGE_ATTACHMENT_JOIN,
-            MESSAGE_PAYLOAD, MESSAGE_SUMMARY_INFO, RECENTLY_DELETED, Table,
+            MESSAGE_PAYLOAD, MESSAGE_SUMMARY_INFO, RECENTLY_DELETED, Table, flatten_row,
         },
     },
     util::{
@@ -170,10 +175,6 @@ use crate::{
         streamtyped,
     },
 };
-
-// MARK: Columns
-/// Columns shared by the explicit message query heads, in positional decode order.
-pub(crate) const COLS: &str = "rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji";
 
 /// Row from the `message` table, plus body/edit metadata populated by [`parse_body`](Self::parse_body).
 #[derive(Debug)]
@@ -277,8 +278,13 @@ pub struct ParsedBody {
 
 // MARK: Table
 impl Table for Message {
+    /// Deserialize a row by column name.
+    ///
+    /// Direct `rusqlite::query_map` callers use this method. [`rows`](Self::rows)
+    /// and [`row`](Self::row) read by resolved ordinal and fall back here when a
+    /// required column is absent.
     fn from_row(row: &Row) -> Result<Message> {
-        Self::from_row_idx(row).or_else(|_| Self::from_row_named(row))
+        Self::from_row_named(row)
     }
 
     /// Prepare the first message query compatible with the database schema.
@@ -288,6 +294,42 @@ impl Table for Message {
             .or_else(|_| db.prepare_cached(&ios_16_newer_query(None)))
             .or_else(|_| db.prepare_cached(&ios_14_15_query(None)))
             .or_else(|_| db.prepare_cached(&ios_13_older_query(None)))?)
+    }
+
+    /// Resolve the column layout after the first step, then deserialize every
+    /// row by ordinal. An absent required column selects
+    /// [`from_row`](Self::from_row) for the complete iteration.
+    ///
+    /// Resolving through the first [`Row`] observes metadata after
+    /// `sqlite3_step`, which may recompile a statement when its schema changed
+    /// after preparation.
+    fn rows<'stmt, P: Params>(
+        stmt: &'stmt mut Statement<'_>,
+        params: P,
+    ) -> Result<impl Iterator<Item = Result<Self, TableError>> + 'stmt, TableError>
+    where
+        Self: 'stmt,
+    {
+        let mut columns = None;
+        let mapped = stmt.query_map(params, move |row| {
+            let columns = columns.get_or_insert_with(|| MessageColumns::resolve(row.as_ref()));
+            Ok(match columns.as_ref() {
+                Some(columns) => Self::from_row_mapped(row, columns),
+                None => Self::from_row(row),
+            })
+        })?;
+        Ok(mapped.map(flatten_row))
+    }
+
+    /// Resolve the stepped row's column layout, then deserialize by ordinal.
+    /// An absent required column falls back to [`from_row`](Self::from_row).
+    fn row<P: Params>(stmt: &mut Statement<'_>, params: P) -> Result<Self, TableError> {
+        flatten_row(stmt.query_row(params, |row| {
+            Ok(match MessageColumns::resolve(row.as_ref()) {
+                Some(columns) => Self::from_row_mapped(row, &columns),
+                None => Self::from_row(row),
+            })
+        }))
     }
 }
 
@@ -406,7 +448,7 @@ impl Cacheable for Message {
         // Create query
         let statement = db.prepare(&format!(
             "SELECT
-                 {COLS},
+                 {COMMON_COLS},
                  c.chat_id,
                  (SELECT COUNT(*) FROM {MESSAGE_ATTACHMENT_JOIN} a WHERE m.ROWID = a.message_id) as num_attachments,
                  NULL as deleted_from,
@@ -453,86 +495,6 @@ impl Cacheable for Message {
 
 // MARK: Impl
 impl Message {
-    /// Build a [`Message`] from a row using indexed columns.
-    fn from_row_idx(row: &Row) -> Result<Message> {
-        Ok(Message {
-            rowid: row.get(0)?,
-            guid: row.get(1)?,
-            text: row.get(2).unwrap_or(None),
-            service: row.get(3).unwrap_or(None),
-            handle_id: row.get(4).unwrap_or(None),
-            destination_caller_id: row.get(5).unwrap_or(None),
-            subject: row.get(6).unwrap_or(None),
-            date: row.get(7)?,
-            date_read: row.get(8).unwrap_or(0),
-            date_delivered: row.get(9).unwrap_or(0),
-            is_from_me: row.get(10)?,
-            is_read: row.get(11).unwrap_or(false),
-            item_type: row.get(12).unwrap_or_default(),
-            other_handle: row.get(13).unwrap_or(None),
-            share_status: row.get(14).unwrap_or(false),
-            share_direction: row.get(15).unwrap_or(None),
-            group_title: row.get(16).unwrap_or(None),
-            group_action_type: row.get(17).unwrap_or(0),
-            associated_message_guid: row.get(18).unwrap_or(None),
-            associated_message_type: row.get(19).unwrap_or(None),
-            balloon_bundle_id: row.get(20).unwrap_or(None),
-            expressive_send_style_id: row.get(21).unwrap_or(None),
-            thread_originator_guid: row.get(22).unwrap_or(None),
-            thread_originator_part: row.get(23).unwrap_or(None),
-            date_edited: row.get(24).unwrap_or(0),
-            associated_message_emoji: row.get(25).unwrap_or(None),
-            chat_id: row.get(26).unwrap_or(None),
-            num_attachments: row.get(27)?,
-            deleted_from: row.get(28).unwrap_or(None),
-            num_replies: row.get(29)?,
-            filter_action: row.get(30).unwrap_or(None),
-            filter_sub_action: row.get(31).unwrap_or(None),
-            components: vec![],
-            edited_parts: None,
-        })
-    }
-
-    /// Build a [`Message`] from a row using named columns.
-    fn from_row_named(row: &Row) -> Result<Message> {
-        Ok(Message {
-            rowid: row.get("rowid")?,
-            guid: row.get("guid")?,
-            text: row.get("text").unwrap_or(None),
-            service: row.get("service").unwrap_or(None),
-            handle_id: row.get("handle_id").unwrap_or(None),
-            destination_caller_id: row.get("destination_caller_id").unwrap_or(None),
-            subject: row.get("subject").unwrap_or(None),
-            date: row.get("date")?,
-            date_read: row.get("date_read").unwrap_or(0),
-            date_delivered: row.get("date_delivered").unwrap_or(0),
-            is_from_me: row.get("is_from_me")?,
-            is_read: row.get("is_read").unwrap_or(false),
-            item_type: row.get("item_type").unwrap_or_default(),
-            other_handle: row.get("other_handle").unwrap_or(None),
-            share_status: row.get("share_status").unwrap_or(false),
-            share_direction: row.get("share_direction").unwrap_or(None),
-            group_title: row.get("group_title").unwrap_or(None),
-            group_action_type: row.get("group_action_type").unwrap_or(0),
-            associated_message_guid: row.get("associated_message_guid").unwrap_or(None),
-            associated_message_type: row.get("associated_message_type").unwrap_or(None),
-            balloon_bundle_id: row.get("balloon_bundle_id").unwrap_or(None),
-            expressive_send_style_id: row.get("expressive_send_style_id").unwrap_or(None),
-            thread_originator_guid: row.get("thread_originator_guid").unwrap_or(None),
-            thread_originator_part: row.get("thread_originator_part").unwrap_or(None),
-            date_edited: row.get("date_edited").unwrap_or(0),
-            associated_message_emoji: row.get("associated_message_emoji").unwrap_or(None),
-            chat_id: row.get("chat_id").unwrap_or(None),
-            num_attachments: row.get("num_attachments")?,
-            deleted_from: row.get("deleted_from").unwrap_or(None),
-            num_replies: row.get("num_replies")?,
-            filter_action: row.get("filter_action").unwrap_or(None),
-            filter_sub_action: row.get("filter_sub_action").unwrap_or(None),
-            components: vec![],
-            edited_parts: None,
-        })
-    }
-
     // MARK: Text Gen
     /// Parse the body of a message, deserializing it as [`typedstream`](crate::util::typedstream)
     /// (and falling back to [`streamtyped`]) data if necessary.

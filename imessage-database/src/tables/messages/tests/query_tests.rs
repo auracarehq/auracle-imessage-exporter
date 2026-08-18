@@ -294,7 +294,7 @@ mod query_string_tests {
     fn can_generate_no_filters_27() {
         let query_string = query_parts::ios_27_newer_query(None);
         let expected = "\nSELECT
-    rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji,
+    m.rowid, m.guid, m.text, m.service, m.handle_id, m.destination_caller_id, m.subject, m.date, m.date_read, m.date_delivered, m.is_from_me, m.is_read, m.item_type, m.other_handle, m.share_status, m.share_direction, m.group_title, m.group_action_type, m.associated_message_guid, m.associated_message_type, m.balloon_bundle_id, m.expressive_send_style_id, m.thread_originator_guid, m.thread_originator_part, m.date_edited, m.associated_message_emoji,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -315,7 +315,7 @@ ORDER BY
     fn can_generate_filters_27() {
         let query_string = query_parts::ios_27_newer_query(Some("WHERE m.guid = \"fake\""));
         let expected = "\nSELECT
-    rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji,
+    m.rowid, m.guid, m.text, m.service, m.handle_id, m.destination_caller_id, m.subject, m.date, m.date_read, m.date_delivered, m.is_from_me, m.is_read, m.item_type, m.other_handle, m.share_status, m.share_direction, m.group_title, m.group_action_type, m.associated_message_guid, m.associated_message_type, m.balloon_bundle_id, m.expressive_send_style_id, m.thread_originator_guid, m.thread_originator_part, m.date_edited, m.associated_message_emoji,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -344,7 +344,7 @@ ORDER BY
         let query_string = query_parts::ios_27_newer_query(Some(&filters));
         let expected = format!(
             "\nSELECT
-    rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji,
+    m.rowid, m.guid, m.text, m.service, m.handle_id, m.destination_caller_id, m.subject, m.date, m.date_read, m.date_delivered, m.is_from_me, m.is_read, m.item_type, m.other_handle, m.share_status, m.share_direction, m.group_title, m.group_action_type, m.associated_message_guid, m.associated_message_type, m.balloon_bundle_id, m.expressive_send_style_id, m.thread_originator_guid, m.thread_originator_part, m.date_edited, m.associated_message_emoji,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -366,7 +366,7 @@ ORDER BY
     fn can_generate_no_filters_16() {
         let query_string = query_parts::ios_16_newer_query(None);
         let expected = "\nSELECT
-    rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji,
+    m.rowid, m.guid, m.text, m.service, m.handle_id, m.destination_caller_id, m.subject, m.date, m.date_read, m.date_delivered, m.is_from_me, m.is_read, m.item_type, m.other_handle, m.share_status, m.share_direction, m.group_title, m.group_action_type, m.associated_message_guid, m.associated_message_type, m.balloon_bundle_id, m.expressive_send_style_id, m.thread_originator_guid, m.thread_originator_part, m.date_edited, m.associated_message_emoji,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -387,7 +387,7 @@ ORDER BY
     fn can_generate_filters_16() {
         let query_string = query_parts::ios_16_newer_query(Some("WHERE m.guid = \"fake\""));
         let expected = "\nSELECT
-    rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji,
+    m.rowid, m.guid, m.text, m.service, m.handle_id, m.destination_caller_id, m.subject, m.date, m.date_read, m.date_delivered, m.is_from_me, m.is_read, m.item_type, m.other_handle, m.share_status, m.share_direction, m.group_title, m.group_action_type, m.associated_message_guid, m.associated_message_type, m.balloon_bundle_id, m.expressive_send_style_id, m.thread_originator_guid, m.thread_originator_part, m.date_edited, m.associated_message_emoji,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -416,7 +416,7 @@ ORDER BY
         let query_string = query_parts::ios_16_newer_query(Some(&filters));
         let expected = format!(
             "\nSELECT
-    rowid, guid, text, service, handle_id, destination_caller_id, subject, date, date_read, date_delivered, is_from_me, is_read, item_type, other_handle, share_status, share_direction, group_title, group_action_type, associated_message_guid, associated_message_type, balloon_bundle_id, expressive_send_style_id, thread_originator_guid, thread_originator_part, date_edited, associated_message_emoji,
+    m.rowid, m.guid, m.text, m.service, m.handle_id, m.destination_caller_id, m.subject, m.date, m.date_read, m.date_delivered, m.is_from_me, m.is_read, m.item_type, m.other_handle, m.share_status, m.share_direction, m.group_title, m.group_action_type, m.associated_message_guid, m.associated_message_type, m.balloon_bundle_id, m.expressive_send_style_id, m.thread_originator_guid, m.thread_originator_part, m.date_edited, m.associated_message_emoji,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     d.chat_id as deleted_from,
@@ -438,7 +438,7 @@ ORDER BY
     fn can_generate_no_filters_14_15() {
         let query_string = query_parts::ios_14_15_query(None);
         let expected = "\nSELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
@@ -457,7 +457,7 @@ ORDER BY
     fn can_generate_filters_14_15() {
         let query_string = query_parts::ios_14_15_query(Some("WHERE m.guid = \"fake\""));
         let expected = "\nSELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
@@ -483,7 +483,7 @@ ORDER BY
         let query_string = query_parts::ios_14_15_query(Some(&filters));
         let expected = format!(
             "\nSELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
@@ -502,7 +502,7 @@ ORDER BY
     fn can_generate_no_filters_13() {
         let query_string = query_parts::ios_13_older_query(None);
         let expected = "\nSELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
@@ -521,7 +521,7 @@ ORDER BY
     fn can_generate_filters_13() {
         let query_string = query_parts::ios_13_older_query(Some("WHERE m.guid = \"fake\""));
         let expected = "\nSELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
@@ -547,7 +547,7 @@ ORDER BY
         let query_string = query_parts::ios_13_older_query(Some(&filters));
         let expected = format!(
             "\nSELECT
-    *,
+    m.*,
     c.chat_id,
     (SELECT COUNT(*) FROM message_attachment_join a WHERE m.ROWID = a.message_id) as num_attachments,
     NULL as deleted_from,
