@@ -88,36 +88,33 @@ pub fn dispatch_app_balloon<F: BalloonFormatter>(
             URLOverride::SharedPlacemark(b) => formatter.format_placemark(&b),
         }
     } else {
-        match AppMessage::from_map(&parsed) {
-            Ok(bubble) => match balloon {
-                CustomBalloon::Application(bundle_id) => {
+        let bubble = AppMessage::from_map(&parsed)?;
+        match balloon {
+            CustomBalloon::Application(bundle_id) => {
+                formatter.format_generic_app(&bubble, bundle_id, attachments, message)
+            }
+            CustomBalloon::ApplePay => formatter.format_apple_pay(&bubble),
+            CustomBalloon::Fitness => formatter.format_fitness(&bubble),
+            CustomBalloon::Slideshow => formatter.format_slideshow(&bubble),
+            CustomBalloon::CheckIn => formatter.format_check_in(&bubble),
+            CustomBalloon::FindMy => formatter.format_find_my(&bubble),
+            CustomBalloon::Business => match BusinessMessage::from_map(&parsed) {
+                Ok(business) => formatter.format_business(&business),
+                // Older business payloads use the same bundle ID but do
+                // not carry a supported interactive schema. Preserve the
+                // generic app-card fallback for those rows.
+                Err(_) => {
+                    let bundle_id = parse_balloon_bundle_id(message.balloon_bundle_id.as_deref())
+                        .unwrap_or_default();
                     formatter.format_generic_app(&bubble, bundle_id, attachments, message)
                 }
-                CustomBalloon::ApplePay => formatter.format_apple_pay(&bubble),
-                CustomBalloon::Fitness => formatter.format_fitness(&bubble),
-                CustomBalloon::Slideshow => formatter.format_slideshow(&bubble),
-                CustomBalloon::CheckIn => formatter.format_check_in(&bubble),
-                CustomBalloon::FindMy => formatter.format_find_my(&bubble),
-                CustomBalloon::Business => match BusinessMessage::from_map(&parsed) {
-                    Ok(business) => formatter.format_business(&business),
-                    // Older business payloads use the same bundle ID but do
-                    // not carry a supported interactive schema. Preserve the
-                    // generic app-card fallback for those rows.
-                    Err(_) => {
-                        let bundle_id =
-                            parse_balloon_bundle_id(message.balloon_bundle_id.as_deref())
-                                .unwrap_or_default();
-                        formatter.format_generic_app(&bubble, bundle_id, attachments, message)
-                    }
-                },
-                CustomBalloon::Polls
-                | CustomBalloon::Handwriting
-                | CustomBalloon::DigitalTouch
-                | CustomBalloon::URL => {
-                    return Err(PlistParseError::WrongMessageType.into());
-                }
             },
-            Err(why) => return Err(why.into()),
+            CustomBalloon::Polls
+            | CustomBalloon::Handwriting
+            | CustomBalloon::DigitalTouch
+            | CustomBalloon::URL => {
+                return Err(PlistParseError::WrongMessageType.into());
+            }
         }
     };
 

@@ -1,65 +1,92 @@
-# imessage-exporter
+# auracle-imessage-exporter
 
-This crate provides both a library to interact with iMessage data as well as a binary that can perform some useful read-only operations using that data. The aim of this project is to provide the most comprehensive and accurate representation of iMessage data available.
+`auracle-imessage-exporter` is a standalone GPLv3 command-line program that
+streams a local macOS Messages archive as deterministic JSONL. It is useful
+from a terminal without Auracle. Auracle invokes a separately installed copy;
+the executable is not linked, vendored, downloaded by, or bundled with the
+Auracle application.
 
-This free and open-source software can:
+> **Legal release gate:** the GPL process-separation boundary still requires
+> OSS counsel review before general Auracle distribution. A release from this
+> repository must not be described as legally cleared merely because its
+> source, signature, checksum, or CI checks are complete.
 
-- Save, export, backup, and archive iMessage data to open, portable formats
-- Preserve multimedia content (images, videos, audio) from conversations
-- Facilitate easy migration of message history between devices and platforms
-- Run diagnostics on the iMessage database
-- Give you full ownership and control over your communication history
-- Support compliance with data retention policies or legal requirements
-- Run on macOS, Linux, and Windows
+## Command
 
-## Example Export
+```sh
+auracle-imessage-exporter export-jsonl \
+  --db-path ~/Library/Messages/chat.db \
+  --attachments metadata \
+  [--cursor <opaque-cursor>]
+```
 
-![HTML Export Sample](/docs/hero.png)
+The first stdout line is a `manifest`, the last is a `checkpoint`, and every
+line conforms to [`docs/auracle-imessage-jsonl-v1.schema.json`](docs/auracle-imessage-jsonl-v1.schema.json).
+All diagnostics are data-free categories written to stderr.
 
-## Binary
+The exporter:
 
-The `imessage-exporter` binary exports iMessage data to `txt` or `html` formats. It can also run diagnostics to find problems with the iMessage database.
+- opens SQLite read-only and streams message and attachment records;
+- never emits a filesystem path or reads attachment contents;
+- emits attachment association, MIME type, basename, byte count, and
+  availability only;
+- retains direct/group participant and sender attribution;
+- folds reactions into their canonical message and suppresses service rows;
+- reads Apple's modern edit summary and emits the latest canonical edit;
+- produces stable source identifiers and deterministic ordering;
+- returns an opaque resumable cursor; and
+- switches to a full export when the cursor belongs to a different database
+  fingerprint.
 
-Installation instructions for the binary are located [here](imessage-exporter/README.md).
+`checkpoint.totals.records` includes the manifest and checkpoint. Message and
+chat totals count records in the current pass, not the lifetime database total.
 
-## Library
+## Install a release
 
-The `imessage_database` library provides models that allow us to access iMessage information as native, cross-platform data structures.
+Download both adjacent assets from
+<https://github.com/auracarehq/auracle-imessage-exporter/releases>:
 
-Documentation for the library is located [here](imessage-database/README.md).
+```text
+auracle-imessage-exporter
+auracle-imessage-exporter.sha256
+```
 
-### Supported Features
+Then verify before execution:
 
-This crate supports every iMessage feature as of macOS Tahoe 26.5.1 (25F80) and iOS 26.5.1 (23F81):
+```sh
+shasum -a 256 -c auracle-imessage-exporter.sha256
+codesign --verify --deep --strict --verbose=2 auracle-imessage-exporter
+spctl --assess --type execute --verbose=2 auracle-imessage-exporter
+chmod 755 auracle-imessage-exporter
+```
 
-- iMessage, RCS, SMS, and MMS
-- Multi-part messages
-- Replies/Threads
-- Formatted text
-- Attachments
-- Expressives
-- Tapbacks
-- Stickers
-- Apple Pay
-- Group chats
-- Digital Touch
-- URL Previews
-- Audio messages
-- App Integrations
-- Edited messages
-- Business messages
-- Handwritten messages
+Auracle performs its own signature and adjacent-checksum verification when the
+member selects this binary in “Locate exporter…”.
 
-See more detail about supported features [here](docs/features.md).
+## Build and test
 
-## Frequently Asked Questions
+See [`docs/BUILDING.md`](docs/BUILDING.md) for pinned, reproducible commands.
+The required local gates are:
 
-The FAQ document is located [here](/docs/faq.md).
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+```
 
-## Special Thanks
+Synthetic SQLite fixtures cover direct/group chats, incoming/outgoing
+messages, modern edits, reactions, service records, attributed bodies, missing
+attachments, cursors, idempotency, schema validation, deterministic golden
+output, and older database schemas. No private archive is included.
 
-- All of my friends, for putting up with me sending them random messages to test things
-- [SQLiteFlow](https://www.sqliteflow.com), the SQL viewer I used to explore and reverse engineer the iMessage database
-- [Xplist](https://github.com/ic005k/Xplist), an invaluable tool for reverse engineering the `payload_data` plist format
-- [Compart](https://www.compart.com/en/unicode/), an amazing resource for looking up esoteric unicode details
-- [GNU Project](https://github.com/gnustep/libobjc) and [Archive.org](https://archive.org/details/darwin_0.1), for hosting source code referenced to reverse engineer the `typedstream` format
+## Upstream and license
+
+This repository is a fork of Christopher Sardegna's
+[`ReagentX/imessage-exporter`](https://github.com/ReagentX/imessage-exporter),
+based on the stable `4.2.0` tag (`f4021a1113bd47400ceaedfb79907ef2c63624a9`).
+The full upstream source and history are retained. See [`UPSTREAM.md`](UPSTREAM.md),
+[`MODIFICATIONS.md`](MODIFICATIONS.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+The complete work is licensed under GNU GPL version 3 or later. See
+[`LICENSE`](LICENSE). Upstream and third-party copyright notices remain in the
+source and notice files.

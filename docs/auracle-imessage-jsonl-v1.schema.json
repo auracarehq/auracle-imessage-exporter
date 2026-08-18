@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auracle.health/schemas/imessage-jsonl-v1.json",
+  "title": "Auracle iMessage exporter JSONL record v1",
+  "oneOf": [
+    { "$ref": "#/$defs/manifest" },
+    { "$ref": "#/$defs/handle" },
+    { "$ref": "#/$defs/chat" },
+    { "$ref": "#/$defs/message" },
+    { "$ref": "#/$defs/attachment" },
+    { "$ref": "#/$defs/checkpoint" }
+  ],
+  "$defs": {
+    "short": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version", "tool_version", "database_fingerprint", "export_mode"],
+      "properties": {
+        "type": { "const": "manifest" },
+        "schema_version": { "const": 1 },
+        "tool_version": { "$ref": "#/$defs/short" },
+        "database_fingerprint": { "$ref": "#/$defs/short" },
+        "export_mode": { "enum": ["full", "incremental"] }
+      }
+    },
+    "handle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "source_id", "service", "value"],
+      "properties": {
+        "type": { "const": "handle" },
+        "source_id": { "$ref": "#/$defs/short" },
+        "service": { "$ref": "#/$defs/short" },
+        "value": { "$ref": "#/$defs/short" }
+      }
+    },
+    "chat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "guid", "service", "kind", "participants"],
+      "properties": {
+        "type": { "const": "chat" },
+        "guid": { "$ref": "#/$defs/short" },
+        "service": { "$ref": "#/$defs/short" },
+        "kind": { "enum": ["direct", "group"] },
+        "participants": {
+          "type": "array", "maxItems": 1000, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/short" }
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "guid", "chat_guid", "direction", "sent_at", "edit_state", "reactions"],
+      "properties": {
+        "type": { "const": "message" },
+        "guid": { "$ref": "#/$defs/short" },
+        "chat_guid": { "$ref": "#/$defs/short" },
+        "sender": { "type": ["string", "null"], "maxLength": 2048 },
+        "direction": { "enum": ["incoming", "outgoing"] },
+        "sent_at": { "type": "string", "format": "date-time" },
+        "edited_at": { "type": ["string", "null"], "format": "date-time" },
+        "text": { "type": ["string", "null"], "maxLength": 100000 },
+        "edit_state": { "$ref": "#/$defs/short" },
+        "reactions": { "type": "array", "maxItems": 200 }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "source_id", "message_guid", "available"],
+      "properties": {
+        "type": { "const": "attachment" },
+        "source_id": { "$ref": "#/$defs/short" },
+        "message_guid": { "$ref": "#/$defs/short" },
+        "mime_type": { "type": ["string", "null"], "maxLength": 2048 },
+        "basename": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^[^/\\\\]*$" },
+        "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "available": { "type": "boolean" }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "cursor", "totals"],
+      "properties": {
+        "type": { "const": "checkpoint" },
+        "cursor": { "$ref": "#/$defs/short" },
+        "totals": {
+          "type": "object", "additionalProperties": false,
+          "required": ["records", "messages", "chats"],
+          "properties": {
+            "records": { "type": "integer", "minimum": 0 },
+            "messages": { "type": "integer", "minimum": 0 },
+            "chats": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

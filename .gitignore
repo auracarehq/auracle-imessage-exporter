@@ -4,6 +4,7 @@
 # Generated files
 /target
 /output
+/dist
 
 # OS Files
 .DS_Store

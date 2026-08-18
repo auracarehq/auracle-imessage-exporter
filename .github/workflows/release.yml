@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    environment: oss-counsel-approved
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Validate tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo 'tag must be vMAJOR.MINOR.PATCH' >&2; exit 2 ;;
+          esac
+          test "$(git describe --tags --exact-match HEAD)" = "$RELEASE_TAG"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - name: Test
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+      - name: Import Developer ID identity
+        env:
+          SIGNING_P12: ${{ secrets.MAC_DEVELOPER_ID_APPLICATION_P12 }}
+          SIGNING_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_APPLICATION_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_BUILD_KEYCHAIN_PASSWORD }}
+        run: |
+          keychain_path="$RUNNER_TEMP/auracle-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$SIGNING_P12" | base64 -D > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$SIGNING_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+      - name: Universal build, sign, and checksum
+        env:
+          AURACLE_CODESIGN_IDENTITY: ${{ secrets.MAC_DEVELOPER_ID_APPLICATION_NAME }}
+        run: scripts/build-universal.sh
+      - name: Notarize
+        env:
+          ASC_API_KEY_CONTENT: ${{ secrets.ASC_API_KEY_CONTENT }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_API_KEY_CONTENT" > "$key_path"
+          ditto -c -k --keepParent dist/auracle-imessage-exporter dist/auracle-imessage-exporter.zip
+          xcrun notarytool submit dist/auracle-imessage-exporter.zip \
+            --key "$key_path" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
+          codesign --verify --deep --strict --verbose=2 dist/auracle-imessage-exporter
+          spctl --assess --type execute --verbose=2 dist/auracle-imessage-exporter
+          (cd dist && shasum -a 256 -c auracle-imessage-exporter.sha256)
+      - name: Release notes
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          printf '%s\n\n%s\n' \
+            "auracle-imessage-exporter $RELEASE_TAG" \
+            'The GPL process-separation boundary still requires OSS counsel review before general Auracle distribution. This release is not a claim of legal clearance.' \
+            > "$RUNNER_TEMP/release-notes.md"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo auracarehq/auracle-imessage-exporter \
+            --title "auracle-imessage-exporter $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            dist/auracle-imessage-exporter \
+            dist/auracle-imessage-exporter.sha256 \
+            dist/auracle-imessage-exporter.zip
