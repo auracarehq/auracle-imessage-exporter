@@ -1,4 +1,4 @@
-{"type":"manifest","schema_version":1,"tool_version":"1.0.0","database_fingerprint":"sha256:73a5e5e43e6f2683ebffff9cf4bf415ba63b20fc76cd609a184f07716fed9ef6","export_mode":"full"}
+{"type":"manifest","schema_version":1,"tool_version":"1.0.1","database_fingerprint":"sha256:73a5e5e43e6f2683ebffff9cf4bf415ba63b20fc76cd609a184f07716fed9ef6","export_mode":"full"}
 {"type":"handle","source_id":"handle:1","service":"iMessage","value":"+15550100001"}
 {"type":"handle","source_id":"handle:2","service":"iMessage","value":"friend@example.test"}
 {"type":"chat","guid":"chat-direct","service":"iMessage","kind":"direct","participants":["handle:1"]}
