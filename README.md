@@ -31,7 +31,10 @@ The exporter:
 - emits attachment association, MIME type, basename, byte count, and
   availability only;
 - retains direct/group participant and sender attribution;
-- folds reactions into their canonical message and suppresses service rows;
+- folds tapback reactions into their canonical message, retains normal app
+  payload variants, and suppresses service/association event rows;
+- retains canonical messages linked through Apple's recoverable-chat table and
+  reports truly unassociated rows only as an aggregate, data-free diagnostic;
 - reads Apple's modern edit summary and emits the latest canonical edit;
 - produces stable source identifiers and deterministic ordering;
 - returns an opaque resumable cursor; and
