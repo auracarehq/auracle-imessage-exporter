@@ -8,7 +8,7 @@
  [`Message::rows`](super::Message::rows) maps each head's column names to
  ordinals before decoding. A head may therefore select columns in any order and
  omit columns that [`Message`](super::Message) reads with a default. See
- `MessageColumns` in [`message`](super::message).
+ `MessageColumns` in [`message`](super::columns).
 */
 
 use std::sync::LazyLock;

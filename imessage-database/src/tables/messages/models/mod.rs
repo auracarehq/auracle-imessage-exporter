@@ -1,9 +1,5 @@
 /*!
  Message body models reconstructed from [`message.attributed_body`](crate::tables::messages::message::Message::attributed_body).
-
- Each model lives in its own submodule and is re-exported here. The submodules
- are private so `models::Service` stays the only path to each type: the file
- layout is ours to change, not API downstream code can depend on.
 */
 
 pub use crate::tables::messages::models::{
