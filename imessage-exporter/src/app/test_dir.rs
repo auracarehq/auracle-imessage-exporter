@@ -91,16 +91,17 @@ fn sweep_stale_test_dirs() {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::metadata;
-
     use super::*;
-    use crate::app::file_times::set_file_times;
 
     /// The timestamp in the name controls age even when mtime predates the
     /// stale cutoff.
     #[test]
     #[cfg(unix)]
     fn can_keep_backdated_directory_with_recent_name() {
+        use std::fs::metadata;
+
+        use crate::app::file_times::set_file_times;
+
         let dir = unique_test_dir("sweep-backdated");
         set_file_times(
             &dir,

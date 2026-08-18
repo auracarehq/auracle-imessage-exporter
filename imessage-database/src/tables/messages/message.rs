@@ -160,7 +160,7 @@ use crate::{
             columns::{COMMON_COLS, MessageColumns},
             models::{BubbleComponent, FilterAction, GroupAction, Service, SharedLocation},
             query_parts::{
-                ios_13_older_query, ios_14_15_query, ios_16_newer_query, ios_27_newer_query,
+                ios_13_older_query, ios_14_15_query, ios_16_newer_query, prepare_ios_27_newer,
             },
         },
         table::{
@@ -289,8 +289,7 @@ impl Table for Message {
 
     /// Prepare the first message query compatible with the database schema.
     fn get(db: &'_ Connection) -> Result<CachedStatement<'_>, TableError> {
-        Ok(db
-            .prepare_cached(&ios_27_newer_query(None))
+        Ok(prepare_ios_27_newer(db, None)
             .or_else(|_| db.prepare_cached(&ios_16_newer_query(None)))
             .or_else(|_| db.prepare_cached(&ios_14_15_query(None)))
             .or_else(|_| db.prepare_cached(&ios_13_older_query(None)))?)
@@ -1045,25 +1044,24 @@ impl Message {
         if !context.has_filters() {
             return Self::get(db);
         }
-        Ok(db
-            .prepare_cached(&ios_27_newer_query(Some(&Self::generate_filter_statement(
-                context, true,
-            ))))
-            .or_else(|_| {
-                db.prepare_cached(&ios_16_newer_query(Some(&Self::generate_filter_statement(
-                    context, true,
-                ))))
-            })
-            .or_else(|_| {
-                db.prepare_cached(&ios_14_15_query(Some(&Self::generate_filter_statement(
-                    context, false,
-                ))))
-            })
-            .or_else(|_| {
-                db.prepare_cached(&ios_13_older_query(Some(&Self::generate_filter_statement(
-                    context, false,
-                ))))
-            })?)
+        Ok(
+            prepare_ios_27_newer(db, Some(&Self::generate_filter_statement(context, true)))
+                .or_else(|_| {
+                    db.prepare_cached(&ios_16_newer_query(Some(&Self::generate_filter_statement(
+                        context, true,
+                    ))))
+                })
+                .or_else(|_| {
+                    db.prepare_cached(&ios_14_15_query(Some(&Self::generate_filter_statement(
+                        context, false,
+                    ))))
+                })
+                .or_else(|_| {
+                    db.prepare_cached(&ios_13_older_query(Some(&Self::generate_filter_statement(
+                        context, false,
+                    ))))
+                })?,
+        )
     }
 
     /// Parse the target body component index and GUID from `associated_message_guid`.
@@ -1105,8 +1103,7 @@ impl Message {
             let filters = "WHERE m.thread_originator_guid = ?1";
 
             // `thread_originator_guid` is absent from the iOS 13-era schema.
-            let mut statement = db
-                .prepare_cached(&ios_27_newer_query(Some(filters)))
+            let mut statement = prepare_ios_27_newer(db, Some(filters))
                 .or_else(|_| db.prepare_cached(&ios_16_newer_query(Some(filters))))
                 .or_else(|_| db.prepare_cached(&ios_14_15_query(Some(filters))))?;
 
@@ -1136,8 +1133,7 @@ impl Message {
             let filters = "WHERE m.associated_message_guid = ?1";
 
             // `associated_message_guid` is absent from the iOS 13-era schema.
-            let mut statement = db
-                .prepare_cached(&ios_27_newer_query(Some(filters)))
+            let mut statement = prepare_ios_27_newer(db, Some(filters))
                 .or_else(|_| db.prepare_cached(&ios_16_newer_query(Some(filters))))
                 .or_else(|_| db.prepare_cached(&ios_14_15_query(Some(filters))))?;
 
@@ -1438,8 +1434,7 @@ impl Message {
     /// }
     /// ```
     pub fn from_guid(guid: &str, db: &Connection) -> Result<Self, TableError> {
-        let mut statement = db
-            .prepare_cached(&ios_27_newer_query(Some("WHERE m.guid = ?1")))
+        let mut statement = prepare_ios_27_newer(db, Some("WHERE m.guid = ?1"))
             .or_else(|_| db.prepare_cached(&ios_16_newer_query(Some("WHERE m.guid = ?1"))))
             .or_else(|_| db.prepare_cached(&ios_14_15_query(Some("WHERE m.guid = ?1"))))
             .or_else(|_| db.prepare_cached(&ios_13_older_query(Some("WHERE m.guid = ?1"))))?;

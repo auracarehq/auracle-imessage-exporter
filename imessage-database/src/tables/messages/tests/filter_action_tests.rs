@@ -58,7 +58,9 @@ mod filter_action_mapping_tests {
 mod filter_action_query_tests {
     use rusqlite::Connection;
 
-    use crate::tables::messages::{Message, models::FilterAction};
+    use crate::tables::messages::{
+        Message, models::FilterAction, query_parts::prepare_ios_27_newer,
+    };
 
     /// Build the minimum schema consumed by the message query. `macos_27`
     /// controls whether the filter columns are present and which query can prepare.
@@ -193,5 +195,47 @@ mod filter_action_query_tests {
 
         assert_eq!(message.filter_action(), Some(FilterAction::Transaction));
         assert_eq!(message.filter_sub_action, Some(2));
+    }
+
+    #[test]
+    fn can_prepare_filter_head_on_macos_27_schema() {
+        let db = schema_db(true);
+
+        assert!(prepare_ios_27_newer(&db, None).is_ok());
+    }
+
+    #[test]
+    fn cannot_prepare_filter_head_on_older_schema() {
+        let db = schema_db(false);
+
+        assert!(prepare_ios_27_newer(&db, None).is_err());
+    }
+
+    #[test]
+    fn cannot_prepare_filter_head_with_only_one_filter_column() {
+        let db = schema_db(false);
+        db.execute_batch("ALTER TABLE message ADD COLUMN filter_action INTEGER")
+            .unwrap();
+
+        assert!(prepare_ios_27_newer(&db, None).is_err());
+    }
+
+    #[test]
+    fn half_a_filter_schema_reads_no_filter_action() {
+        let db = schema_db(false);
+        db.execute_batch("ALTER TABLE message ADD COLUMN filter_action INTEGER")
+            .unwrap();
+        db.execute(
+            "INSERT INTO message (guid, date, is_from_me, filter_action) VALUES ('half', 0, 0, 2)",
+            [],
+        )
+        .unwrap();
+
+        // The iOS 16 head projects `NULL` for both filter fields, even when the
+        // schema contains `filter_action` alone.
+        let message = Message::from_guid("half", &db).unwrap();
+
+        assert_eq!(message.filter_action, None);
+        assert_eq!(message.filter_sub_action, None);
     }
 }
