@@ -3,7 +3,7 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use imessage_exporter::auracle::{ExportOptions, export_jsonl};
+use imessage_exporter::auracle::{DEFAULT_PROGRESS_EVERY, ExportOptions, export_jsonl};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,6 +29,11 @@ enum Command {
         /// Opaque cursor returned by a prior successful export.
         #[arg(long)]
         cursor: Option<String>,
+        /// Opaque cursor from a `progress` record of an interrupted pass.
+        /// Messages that pass already streamed are skipped; handles and chats
+        /// are streamed again so the resumed output stands on its own.
+        #[arg(long)]
+        resume: Option<String>,
     },
 }
 
@@ -44,7 +49,16 @@ fn main() -> ExitCode {
             db_path,
             attachments: AttachmentMode::Metadata,
             cursor,
-        } => export_jsonl(&ExportOptions { db_path, cursor }, std::io::stdout().lock()),
+            resume,
+        } => export_jsonl(
+            &ExportOptions {
+                db_path,
+                cursor,
+                resume,
+                progress_every: DEFAULT_PROGRESS_EVERY,
+            },
+            std::io::stdout().lock(),
+        ),
     };
 
     match result {

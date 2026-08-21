@@ -6,6 +6,8 @@ Auracare added the following to the upstream GPLv3 codebase:
 - the `export-jsonl` command and Auracle JSONL v1 protocol;
 - deterministic read-only SQLite streaming;
 - opaque cursor, edit, reaction, service-message, and attachment-metadata logic;
+- `progress` records and `--resume`, so an interrupted pass is picked up from
+  its last acknowledged position instead of streamed again from the start;
 - Apple association-type classification and recoverable-chat message handling,
   with aggregate-only diagnostics for canonical rows lacking any chat link;
 - synthetic fixtures, JSON Schema validation, golden tests, and cursor tests;
