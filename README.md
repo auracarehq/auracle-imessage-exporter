@@ -17,12 +17,23 @@ Auracle application.
 auracle-imessage-exporter export-jsonl \
   --db-path ~/Library/Messages/chat.db \
   --attachments metadata \
-  [--cursor <opaque-cursor>]
+  [--cursor <opaque-cursor>] \
+  [--resume <progress-cursor>]
 ```
 
 The first stdout line is a `manifest`, the last is a `checkpoint`, and every
 line conforms to [`docs/auracle-imessage-jsonl-v1.schema.json`](docs/auracle-imessage-jsonl-v1.schema.json).
 All diagnostics are data-free categories written to stderr.
+
+Every 200 messages the stream carries a `progress` record holding an opaque
+cursor for the position just streamed. A pass that was interrupted can be
+picked up from the last such cursor its consumer acknowledged by passing it as
+`--resume`: the manifest, every handle and every chat are streamed again, and
+then only the messages the earlier pass had not yet carried — plus any message
+edited, or reacted to, since that pass read the database. `--cursor` keeps its
+meaning alongside it, so a resumed incremental pass stays incremental. A
+`--resume` cursor from a different database is ignored with a
+`resume_ignored` diagnostic and the pass streams in full.
 
 The exporter:
 
@@ -37,12 +48,15 @@ The exporter:
   reports truly unassociated rows only as an aggregate, data-free diagnostic;
 - reads Apple's modern edit summary and emits the latest canonical edit;
 - produces stable source identifiers and deterministic ordering;
-- returns an opaque resumable cursor; and
+- returns an opaque resumable cursor;
+- marks resumable positions with `progress` records and picks a pass up from
+  one with `--resume`; and
 - switches to a full export when the cursor belongs to a different database
   fingerprint.
 
-`checkpoint.totals.records` includes the manifest and checkpoint. Message and
-chat totals count records in the current pass, not the lifetime database total.
+`checkpoint.totals.records` includes the manifest, every `progress` record and
+the checkpoint. Message and chat totals count records in the current pass, not
+the lifetime database total.
 
 ## Install a release
 

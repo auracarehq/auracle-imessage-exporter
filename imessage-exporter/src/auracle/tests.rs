@@ -4,7 +4,9 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{ExportOptions, canonical_message_text, export_jsonl};
+use super::{
+    DEFAULT_PROGRESS_EVERY, ExportOptions, canonical_message_text, decode_cursor, export_jsonl,
+};
 
 struct Fixture {
     _directory: TempDir,
@@ -159,16 +161,69 @@ impl Fixture {
 }
 
 fn run(path: &Path, cursor: Option<String>) -> String {
+    run_with(path, cursor, None, DEFAULT_PROGRESS_EVERY)
+}
+
+fn run_with(
+    path: &Path,
+    cursor: Option<String>,
+    resume: Option<String>,
+    progress_every: u64,
+) -> String {
     let mut output = Vec::new();
     export_jsonl(
         &ExportOptions {
             db_path: path.to_owned(),
             cursor,
+            resume,
+            progress_every,
         },
         &mut output,
     )
     .expect("export succeeds");
     String::from_utf8(output).expect("JSONL is UTF-8")
+}
+
+fn message_guids(output: &str) -> Vec<String> {
+    records(output)
+        .into_iter()
+        .filter(|record| record["type"] == "message")
+        .map(|record| record["guid"].as_str().expect("guid").to_owned())
+        .collect()
+}
+
+fn progress_cursors(output: &str) -> Vec<String> {
+    records(output)
+        .into_iter()
+        .filter(|record| record["type"] == "progress")
+        .map(|record| record["cursor"].as_str().expect("cursor").to_owned())
+        .collect()
+}
+
+fn add_message(database: &Connection, rowid: i64, guid: &str, chat: i64) {
+    database
+        .execute(
+            "INSERT INTO message(ROWID, guid, text, service, handle_id, date, is_from_me) \
+             VALUES (?1, ?2, 'later canonical', 'iMessage', 1, ?1, 0)",
+            params![rowid, guid],
+        )
+        .expect("new message");
+    database
+        .execute(
+            "INSERT INTO chat_message_join(chat_id, message_id) VALUES (?1, ?2)",
+            params![chat, rowid],
+        )
+        .expect("message chat");
+}
+
+fn edit_message(database: &Connection, rowid: i64) {
+    database
+        .execute(
+            "UPDATE message SET text = 'edited canonical', \
+             date_edited = 800000000000000000 WHERE ROWID = ?1",
+            [rowid],
+        )
+        .expect("edit message");
 }
 
 fn records(output: &str) -> Vec<Value> {
@@ -410,4 +465,180 @@ fn fully_unsent_modern_message_does_not_fall_back_to_deleted_text() {
         canonical_message_text(Some(summary), Some("deleted private text".to_owned()), None),
         None
     );
+}
+
+#[test]
+fn progress_records_mark_resumable_positions_and_count_as_records() {
+    let fixture = Fixture::rich();
+    let output = run_with(&fixture.path, None, None, 3);
+    assert_schema(&output);
+    let values = records(&output);
+    let cursors = progress_cursors(&output);
+    // Seven messages stream; a mark lands after the third and the sixth.
+    assert_eq!(cursors.len(), 2);
+    let third = values
+        .iter()
+        .filter(|record| record["type"] == "message")
+        .nth(2)
+        .expect("third message");
+    assert_eq!(third["guid"], "GUID-M3");
+    let mark = decode_cursor(&cursors[0]).expect("progress cursor decodes");
+    assert_eq!(
+        mark.last_message_rowid, 104,
+        "the mark is the row just streamed"
+    );
+    let checkpoint = decode_cursor(&checkpoint_cursor(&output)).expect("checkpoint cursor");
+    assert_eq!(mark.database_fingerprint, checkpoint.database_fingerprint);
+    assert_eq!(mark.last_edited_at, checkpoint.last_edited_at);
+    assert_eq!(mark.last_message_date, checkpoint.last_message_date);
+    assert!(mark.last_message_rowid < checkpoint.last_message_rowid);
+    // The marks are records like any other: the consumer uploads and counts
+    // them, so the checkpoint's total has to include them.
+    let total = values
+        .iter()
+        .find(|record| record["type"] == "checkpoint")
+        .map(|record| record["totals"]["records"].as_u64().expect("records total"))
+        .expect("checkpoint");
+    assert_eq!(total, values.len() as u64);
+    // The position of a mark in the stream is the position the record claims.
+    let mark_index = values
+        .iter()
+        .position(|record| record["type"] == "progress")
+        .expect("first mark");
+    assert!(
+        values[..mark_index]
+            .iter()
+            .filter(|record| record["type"] == "message")
+            .count()
+            == 3
+    );
+}
+
+#[test]
+fn the_default_interval_leaves_a_short_pass_and_its_golden_output_untouched() {
+    let fixture = Fixture::rich();
+    let output = run(&fixture.path, None);
+    assert!(progress_cursors(&output).is_empty());
+    assert_eq!(
+        output,
+        include_str!("../../../test_data/auracle/rich.jsonl")
+    );
+}
+
+#[test]
+fn resuming_from_a_progress_cursor_skips_what_the_earlier_pass_carried() {
+    let fixture = Fixture::rich();
+    let first_pass = run_with(&fixture.path, None, None, 3);
+    let mark = progress_cursors(&first_pass).remove(0);
+    let database = Connection::open(&fixture.path).expect("fixture database");
+    edit_message(&database, 100);
+    add_message(&database, 111, "GUID-M4", 10);
+    drop(database);
+
+    let resumed = run_with(&fixture.path, None, Some(mark.clone()), 0);
+    let replayed = run_with(&fixture.path, None, Some(mark), 0);
+    assert_eq!(resumed, replayed, "resuming twice streams the same bytes");
+    assert_schema(&resumed);
+    let values = records(&resumed);
+    // The resumed stream stands on its own: manifest, every handle, every chat.
+    assert_eq!(values[0]["type"], "manifest");
+    assert_eq!(values[0]["export_mode"], "full");
+    assert_eq!(values.iter().filter(|r| r["type"] == "handle").count(), 2);
+    assert_eq!(values.iter().filter(|r| r["type"] == "chat").count(), 2);
+    // Then only what the earlier pass had not carried -- the messages after
+    // the mark, the new message -- plus the one edited since it read the
+    // database. GUID-M2 and GUID-M3 streamed before the mark and stay out.
+    assert_eq!(
+        message_guids(&resumed),
+        [
+            "GUID-M1",
+            "GUID-EDITED",
+            "GUID-APP-2",
+            "GUID-APP-3",
+            "GUID-RECOVERED",
+            "GUID-M4",
+        ]
+    );
+    assert!(resumed.contains("edited canonical"));
+    // Its checkpoint is a real cursor: the next incremental pass is empty.
+    let next = run(&fixture.path, Some(checkpoint_cursor(&resumed)));
+    assert_eq!(records(&next)[0]["export_mode"], "incremental");
+    assert!(message_guids(&next).is_empty());
+}
+
+#[test]
+fn resuming_an_incremental_pass_keeps_both_windows_closed() {
+    let fixture = Fixture::rich();
+    let baseline = checkpoint_cursor(&run(&fixture.path, None));
+    let database = Connection::open(&fixture.path).expect("fixture database");
+    for (rowid, guid) in [
+        (111, "GUID-N1"),
+        (112, "GUID-N2"),
+        (113, "GUID-N3"),
+        (114, "GUID-N4"),
+    ] {
+        add_message(&database, rowid, guid, 10);
+    }
+    drop(database);
+
+    let incremental = run_with(&fixture.path, Some(baseline.clone()), None, 2);
+    assert_eq!(records(&incremental)[0]["export_mode"], "incremental");
+    assert_eq!(
+        message_guids(&incremental),
+        ["GUID-N1", "GUID-N2", "GUID-N3", "GUID-N4"]
+    );
+    let mark = progress_cursors(&incremental).remove(0);
+    assert_eq!(decode_cursor(&mark).expect("mark").last_message_rowid, 112);
+
+    let database = Connection::open(&fixture.path).expect("fixture database");
+    add_message(&database, 115, "GUID-N5", 10);
+    edit_message(&database, 100);
+    drop(database);
+
+    let resumed = run_with(&fixture.path, Some(baseline), Some(mark), 0);
+    assert_eq!(records(&resumed)[0]["export_mode"], "incremental");
+    // Outside the baseline AND outside the mark: the edit to an old message,
+    // the two new messages the first pass never reached, and the newest one.
+    // Inside either window -- the untouched archive, GUID-N1 and GUID-N2 --
+    // stays out.
+    assert_eq!(
+        message_guids(&resumed),
+        ["GUID-M1", "GUID-N3", "GUID-N4", "GUID-N5"]
+    );
+}
+
+#[test]
+fn a_progress_cursor_from_another_database_is_ignored_not_obeyed() {
+    let fixture = Fixture::rich();
+    let mark = progress_cursors(&run_with(&fixture.path, None, None, 3)).remove(0);
+    let database = Connection::open(&fixture.path).expect("fixture database");
+    database
+        .execute(
+            "UPDATE message SET guid = 'REPLACED-M1' WHERE ROWID = 100",
+            params![],
+        )
+        .expect("replace identity");
+    drop(database);
+
+    let output = run_with(&fixture.path, None, Some(mark), 0);
+    let values = records(&output);
+    assert_eq!(values[0]["export_mode"], "full");
+    assert_eq!(message_guids(&output).len(), 7);
+    assert_eq!(message_guids(&output)[0], "REPLACED-M1");
+}
+
+#[test]
+fn a_malformed_resume_cursor_is_refused_like_a_malformed_cursor() {
+    let fixture = Fixture::rich();
+    let error = export_jsonl(
+        &ExportOptions {
+            db_path: fixture.path.clone(),
+            cursor: None,
+            resume: Some("not-a-cursor".to_owned()),
+            progress_every: 0,
+        },
+        &mut Vec::new(),
+    )
+    .expect_err("a malformed resume cursor cannot be obeyed");
+    assert_eq!(error.to_string(), "invalid_cursor");
 }

@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: u8 = 1;
+/// How many messages a pass streams between `progress` records. Auracle
+/// batches 500 records, so a resume point lands inside nearly every batch.
+pub const DEFAULT_PROGRESS_EVERY: u64 = 200;
 const APPLE_EPOCH_UNIX_SECONDS: i64 = 978_307_200;
 const NANOSECOND_THRESHOLD: i64 = 1_000_000_000_000;
 
@@ -54,6 +57,12 @@ impl std::error::Error for ExportError {}
 pub struct ExportOptions {
     pub db_path: PathBuf,
     pub cursor: Option<String>,
+    /// The cursor from a `progress` record of an interrupted pass. Messages
+    /// that pass had already streamed are skipped; handles and chats are
+    /// always re-emitted so the resumed stream stands on its own.
+    pub resume: Option<String>,
+    /// Emit a `progress` record after this many messages; zero emits none.
+    pub progress_every: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -130,6 +139,16 @@ struct Attachment {
     available: bool,
 }
 
+/// A resumable position inside one pass. Its cursor is a `CursorV1` whose
+/// `last_message_rowid` is the message just streamed rather than the
+/// database's last row, so `--resume` can pick the pass up from there.
+#[derive(Serialize)]
+struct Progress {
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    cursor: String,
+}
+
 #[derive(Serialize)]
 struct Checkpoint {
     #[serde(rename = "type")]
@@ -172,6 +191,104 @@ impl<W: Write> Emitter<W> {
     }
 }
 
+/// A span of the archive an earlier pass already carried, read from a cursor.
+///
+/// A message is inside the window when nothing about it has changed since
+/// that pass: created no later than the cursor's last row, edited no later
+/// than its edit high-water mark, and not the target of a reaction that
+/// arrived after its last message date. An incremental pass has one window
+/// (the previous checkpoint); a resumed pass adds a second (the progress
+/// point), and a message is streamed only when it is outside every window.
+struct Window {
+    last_message_rowid: i64,
+    last_edited_at: i64,
+    reaction_targets: HashSet<String>,
+}
+
+impl Window {
+    fn open(
+        database: &Connection,
+        message_columns: &HashSet<String>,
+        cursor: &CursorV1,
+    ) -> Result<Self, ExportError> {
+        Ok(Self {
+            last_message_rowid: cursor.last_message_rowid,
+            last_edited_at: cursor.last_edited_at,
+            reaction_targets: changed_reaction_targets(
+                database,
+                message_columns,
+                cursor.last_message_rowid,
+                cursor.last_message_date,
+            )?,
+        })
+    }
+
+    fn contains(&self, rowid: i64, edited_at: i64, guid: &str) -> bool {
+        rowid <= self.last_message_rowid
+            && edited_at <= self.last_edited_at
+            && !self.reaction_targets.contains(guid)
+    }
+}
+
+/// The snapshot's high-water marks, read once. The deferred read transaction
+/// pins one snapshot for the whole pass, so the checkpoint and every progress
+/// record in between describe the same instant.
+struct SnapshotMarks {
+    last_message_rowid: i64,
+    last_edited_at: i64,
+    last_message_date: i64,
+}
+
+impl SnapshotMarks {
+    fn read(database: &Connection, message_columns: &HashSet<String>) -> Result<Self, ExportError> {
+        let last_message_rowid: i64 = database
+            .query_row("SELECT COALESCE(MAX(ROWID), 0) FROM message", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| ExportError::DatabaseRead)?;
+        let last_edited_at = if message_columns.contains("date_edited") {
+            database
+                .query_row(
+                    "SELECT COALESCE(MAX(date_edited), 0) FROM message",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ExportError::DatabaseRead)?
+        } else {
+            0
+        };
+        let last_message_date: i64 = database
+            .query_row("SELECT COALESCE(MAX(date), 0) FROM message", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| ExportError::DatabaseRead)?;
+        Ok(Self {
+            last_message_rowid,
+            last_edited_at,
+            last_message_date,
+        })
+    }
+
+    fn cursor(&self, fingerprint: &str, last_message_rowid: i64) -> CursorV1 {
+        CursorV1 {
+            version: SCHEMA_VERSION,
+            database_fingerprint: fingerprint.to_owned(),
+            last_message_rowid,
+            last_edited_at: self.last_edited_at,
+            last_message_date: self.last_message_date,
+        }
+    }
+}
+
+/// Everything the message loop needs beyond the database itself.
+struct MessageScan<'a> {
+    windows: Vec<Window>,
+    reaction_index: HashMap<String, Vec<Reaction>>,
+    fingerprint: &'a str,
+    marks: &'a SnapshotMarks,
+    progress_every: u64,
+}
+
 /// Export one consistent, read-only SQLite snapshot to newline-delimited JSON.
 ///
 /// Message and attachment rows are serialized directly to `output` as SQLite
@@ -198,6 +315,18 @@ pub fn export_jsonl<W: Write>(options: &ExportOptions, output: W) -> Result<(), 
     let incremental = prior
         .as_ref()
         .is_some_and(|cursor| cursor.database_fingerprint == fingerprint);
+    let resume = match options.resume.as_deref().map(decode_cursor).transpose()? {
+        Some(cursor) if cursor.database_fingerprint == fingerprint => Some(cursor),
+        Some(_) => {
+            // A progress point inside another database is no position at all.
+            // Say so as a category and stream the whole pass; the segment the
+            // caller opens is valid either way, only longer.
+            eprintln!("diagnostic=resume_ignored reason=database_fingerprint");
+            None
+        }
+        None => None,
+    };
+    let marks = SnapshotMarks::read(&database, &message_columns)?;
 
     let mut emitter = Emitter::new(output);
     emitter.record(&Manifest {
@@ -211,71 +340,31 @@ pub fn export_jsonl<W: Write>(options: &ExportOptions, output: W) -> Result<(), 
     emit_handles(&database, &handle_columns, &mut emitter)?;
     let chat_count = emit_chats(&database, &chat_columns, &mut emitter)?;
 
-    let previous_rowid = if incremental {
-        prior.as_ref().map_or(0, |cursor| cursor.last_message_rowid)
-    } else {
-        0
+    let mut windows = Vec::new();
+    if let Some(prior) = prior.filter(|_| incremental) {
+        windows.push(Window::open(&database, &message_columns, &prior)?);
+    }
+    if let Some(resume) = resume {
+        windows.push(Window::open(&database, &message_columns, &resume)?);
+    }
+    let scan = MessageScan {
+        windows,
+        reaction_index: load_reactions(&database, &message_columns)?,
+        fingerprint: &fingerprint,
+        marks: &marks,
+        progress_every: options.progress_every,
     };
-    let previous_edit = if incremental {
-        prior.as_ref().map_or(0, |cursor| cursor.last_edited_at)
-    } else {
-        0
-    };
-    let previous_message_date = if incremental {
-        prior.as_ref().map_or(0, |cursor| cursor.last_message_date)
-    } else {
-        0
-    };
-    let changed_reaction_targets = changed_reaction_targets(
-        &database,
-        &message_columns,
-        previous_rowid,
-        previous_message_date,
-        incremental,
-    )?;
-    let reaction_index = load_reactions(&database, &message_columns)?;
     let message_count = emit_messages(
         &database,
         &message_columns,
         &chat_columns,
         &attachment_columns,
-        previous_rowid,
-        previous_edit,
-        incremental,
-        &changed_reaction_targets,
-        &reaction_index,
+        &scan,
         &mut emitter,
     )?;
     report_unassociated_messages(&database, &message_columns)?;
 
-    let last_message_rowid: i64 = database
-        .query_row("SELECT COALESCE(MAX(ROWID), 0) FROM message", [], |row| {
-            row.get(0)
-        })
-        .map_err(|_| ExportError::DatabaseRead)?;
-    let last_edited_at = if message_columns.contains("date_edited") {
-        database
-            .query_row(
-                "SELECT COALESCE(MAX(date_edited), 0) FROM message",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|_| ExportError::DatabaseRead)?
-    } else {
-        0
-    };
-    let last_message_date: i64 = database
-        .query_row("SELECT COALESCE(MAX(date), 0) FROM message", [], |row| {
-            row.get(0)
-        })
-        .map_err(|_| ExportError::DatabaseRead)?;
-    let next_cursor = encode_cursor(&CursorV1 {
-        version: SCHEMA_VERSION,
-        database_fingerprint: fingerprint,
-        last_message_rowid,
-        last_edited_at,
-        last_message_date,
-    })?;
+    let next_cursor = encode_cursor(&marks.cursor(&fingerprint, marks.last_message_rowid))?;
     let final_records = emitter.records + 1;
     emitter.record(&Checkpoint {
         record_type: "checkpoint",
@@ -449,17 +538,12 @@ fn emit_chats<W: Write>(
     Ok(count)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_messages<W: Write>(
     database: &Connection,
     message_columns: &HashSet<String>,
     chat_columns: &HashSet<String>,
     attachment_columns: &HashSet<String>,
-    previous_rowid: i64,
-    previous_edit: i64,
-    incremental: bool,
-    changed_reaction_targets: &HashSet<String>,
-    reaction_index: &HashMap<String, Vec<Reaction>>,
+    scan: &MessageScan<'_>,
     emitter: &mut Emitter<W>,
 ) -> Result<u64, ExportError> {
     for required in ["guid", "date", "is_from_me"] {
@@ -506,7 +590,7 @@ fn emit_messages<W: Write>(
         .prepare(&sql)
         .map_err(|_| ExportError::DatabaseSchema)?;
     let mut rows = statement.query([]).map_err(|_| ExportError::DatabaseRead)?;
-    let mut count = 0;
+    let mut count: u64 = 0;
     while let Some(row) = rows.next().map_err(|_| ExportError::DatabaseRead)? {
         let rowid: i64 = row.get(0).map_err(|_| ExportError::DatabaseRead)?;
         let guid: String = row.get(1).map_err(|_| ExportError::DatabaseRead)?;
@@ -519,10 +603,10 @@ fn emit_messages<W: Write>(
         if is_associated_event || is_service {
             continue;
         }
-        if incremental
-            && rowid <= previous_rowid
-            && edited_raw <= previous_edit
-            && !changed_reaction_targets.contains(&guid)
+        if scan
+            .windows
+            .iter()
+            .any(|window| window.contains(rowid, edited_raw, &guid))
         {
             continue;
         }
@@ -554,10 +638,18 @@ fn emit_messages<W: Write>(
                 .transpose()?,
             text: parsed_text,
             edit_state: if edited_raw > 0 { "edited" } else { "original" },
-            reactions: reaction_index.get(&guid).cloned().unwrap_or_default(),
+            reactions: scan.reaction_index.get(&guid).cloned().unwrap_or_default(),
         })?;
         emit_attachments(database, attachment_columns, rowid, &guid, emitter)?;
         count += 1;
+        if scan.progress_every > 0 && count.is_multiple_of(scan.progress_every) {
+            // After the attachments, so everything up to and including this
+            // message precedes the record a resumed pass will skip to.
+            emitter.record(&Progress {
+                record_type: "progress",
+                cursor: encode_cursor(&scan.marks.cursor(scan.fingerprint, rowid))?,
+            })?;
+        }
     }
     Ok(count)
 }
@@ -647,10 +739,8 @@ fn changed_reaction_targets(
     message_columns: &HashSet<String>,
     previous_rowid: i64,
     previous_message_date: i64,
-    incremental: bool,
 ) -> Result<HashSet<String>, ExportError> {
-    if !incremental
-        || !message_columns.contains("associated_message_guid")
+    if !message_columns.contains("associated_message_guid")
         || !message_columns.contains("associated_message_type")
     {
         return Ok(HashSet::new());

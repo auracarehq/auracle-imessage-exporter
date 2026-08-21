@@ -8,6 +8,7 @@
     { "$ref": "#/$defs/chat" },
     { "$ref": "#/$defs/message" },
     { "$ref": "#/$defs/attachment" },
+    { "$ref": "#/$defs/progress" },
     { "$ref": "#/$defs/checkpoint" }
   ],
   "$defs": {
@@ -79,6 +80,15 @@
         "basename": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^[^/\\\\]*$" },
         "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
         "available": { "type": "boolean" }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "cursor"],
+      "properties": {
+        "type": { "const": "progress" },
+        "cursor": { "$ref": "#/$defs/short" }
       }
     },
     "checkpoint": {
