@@ -102,6 +102,10 @@ struct Chat {
     service: String,
     kind: &'static str,
     participants: Vec<String>,
+    /// The name the member gave a group, when they gave one. Null for a
+    /// direct chat and for a group that was never named, so a consumer can
+    /// tell "unnamed" from "named with an empty string".
+    display_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -493,8 +497,10 @@ fn emit_chats<W: Write>(
 ) -> Result<u64, ExportError> {
     let identity = chat_identity_expression(table_columns)?;
     let service = optional_text(table_columns, "service_name", "unknown");
+    let display_name = optional_nullable(table_columns, "display_name");
     let sql = format!(
-        "SELECT c.ROWID, {identity} AS guid, {service} AS service FROM chat c ORDER BY c.ROWID"
+        "SELECT c.ROWID, {identity} AS guid, {service} AS service, \
+         {display_name} AS display_name FROM chat c ORDER BY c.ROWID"
     );
     let mut statement = database
         .prepare(&sql)
@@ -520,6 +526,7 @@ fn emit_chats<W: Write>(
         } else {
             "direct"
         };
+        let display_name: Option<String> = row.get(3).map_err(|_| ExportError::DatabaseRead)?;
         emitter.record(&Chat {
             record_type: "chat",
             guid: short(
@@ -532,6 +539,10 @@ fn emit_chats<W: Write>(
             ),
             kind,
             participants,
+            display_name: display_name
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .map(short),
         })?;
         count += 1;
     }
@@ -880,6 +891,7 @@ fn optional_nullable(columns: &HashSet<String>, column: &str) -> &'static str {
             "filename" => "a.filename",
             "transfer_name" => "a.transfer_name",
             "mime_type" => "a.mime_type",
+            "display_name" => "c.display_name",
             _ => "NULL",
         }
     } else {

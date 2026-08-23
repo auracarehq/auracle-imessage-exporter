@@ -1,8 +1,8 @@
-{"type":"manifest","schema_version":1,"tool_version":"1.1.0","database_fingerprint":"sha256:73a5e5e43e6f2683ebffff9cf4bf415ba63b20fc76cd609a184f07716fed9ef6","export_mode":"full"}
+{"type":"manifest","schema_version":1,"tool_version":"1.2.0","database_fingerprint":"sha256:73a5e5e43e6f2683ebffff9cf4bf415ba63b20fc76cd609a184f07716fed9ef6","export_mode":"full"}
 {"type":"handle","source_id":"handle:1","service":"iMessage","value":"+15550100001"}
 {"type":"handle","source_id":"handle:2","service":"iMessage","value":"friend@example.test"}
-{"type":"chat","guid":"chat-direct","service":"iMessage","kind":"direct","participants":["handle:1"]}
-{"type":"chat","guid":"chat-group","service":"iMessage","kind":"group","participants":["handle:1","handle:2"]}
+{"type":"chat","guid":"chat-direct","service":"iMessage","kind":"direct","participants":["handle:1"],"display_name":null}
+{"type":"chat","guid":"chat-group","service":"iMessage","kind":"group","participants":["handle:1","handle:2"],"display_name":"Sunday Five-a-side"}
 {"type":"message","guid":"GUID-M1","chat_guid":"chat-direct","sender":"handle:1","direction":"incoming","sent_at":"2001-01-01T00:00:01.000000000Z","edited_at":null,"text":"direct incoming","edit_state":"original","reactions":[{"source_id":"GUID-R1","sender":"handle:2","kind":"like","removed":false}]}
 {"type":"message","guid":"GUID-M2","chat_guid":"chat-group","sender":null,"direction":"outgoing","sent_at":"2001-01-01T00:00:02.000000000Z","edited_at":null,"text":"group outgoing","edit_state":"original","reactions":[]}
 {"type":"attachment","source_id":"ATTACHMENT-1","message_guid":"GUID-M2","mime_type":"image/jpeg","basename":"safe-photo.jpg","size_bytes":1234,"available":false}

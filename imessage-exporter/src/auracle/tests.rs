@@ -45,9 +45,9 @@ impl Fixture {
                 INSERT INTO handle(ROWID, id, service) VALUES
                     (1, '+15550100001', 'iMessage'),
                     (2, 'friend@example.test', 'iMessage');
-                INSERT INTO chat(ROWID, guid, chat_identifier, service_name) VALUES
-                    (10, 'chat-direct', 'direct', 'iMessage'),
-                    (11, 'chat-group', 'group', 'iMessage');
+                INSERT INTO chat(ROWID, guid, chat_identifier, service_name, display_name) VALUES
+                    (10, 'chat-direct', 'direct', 'iMessage', NULL),
+                    (11, 'chat-group', 'group', 'iMessage', '  Sunday Five-a-side ');
                 INSERT INTO chat_handle_join(chat_id, handle_id) VALUES
                     (10, 1), (11, 1), (11, 2);
 
@@ -642,3 +642,35 @@ fn a_malformed_resume_cursor_is_refused_like_a_malformed_cursor() {
     .expect_err("a malformed resume cursor cannot be obeyed");
     assert_eq!(error.to_string(), "invalid_cursor");
 }
+
+#[test]
+fn a_group_carries_the_name_its_member_gave_it_and_a_direct_chat_carries_none() {
+    let fixture = Fixture::rich();
+    let output = run(&fixture.path, None);
+    let chats: Vec<Value> = records(&output)
+        .into_iter()
+        .filter(|record| record["type"] == "chat")
+        .collect();
+    let by_guid = |guid: &str| {
+        chats
+            .iter()
+            .find(|chat| chat["guid"] == guid)
+            .cloned()
+            .expect("chat record")
+    };
+    assert_eq!(by_guid("chat-group")["display_name"], "Sunday Five-a-side");
+    assert_eq!(by_guid("chat-direct")["display_name"], Value::Null);
+    assert_schema(&output);
+}
+
+#[test]
+fn a_database_without_a_display_name_column_still_exports_chats() {
+    let fixture = Fixture::legacy_schema();
+    let output = run(&fixture.path, None);
+    let chat = records(&output)
+        .into_iter()
+        .find(|record| record["type"] == "chat")
+        .expect("chat record");
+    assert_eq!(chat["display_name"], Value::Null);
+}
+
