@@ -673,4 +673,3 @@ fn a_database_without_a_display_name_column_still_exports_chats() {
         .expect("chat record");
     assert_eq!(chat["display_name"], Value::Null);
 }
-
