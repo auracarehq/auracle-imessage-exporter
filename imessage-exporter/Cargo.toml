@@ -7,7 +7,7 @@ exclude = [".github", "docs", "build.sh"]
 license = "GPL-3.0-or-later"
 name = "imessage-exporter"
 repository = "https://github.com/auracarehq/auracle-imessage-exporter"
-version = "1.1.0"
+version = "1.2.0"
 
 [[bin]]
 name = "auracle-imessage-exporter"
